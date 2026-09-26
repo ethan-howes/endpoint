@@ -1,0 +1,24 @@
+# Core
+requests
+tqdm
+numpy
+opencv-python
+matplotlib
+plotly
+
+# Camera pipeline
+ultralytics          # YOLOv8 + built-in ByteTrack
+image-dehazer        # Dark Channel Prior dehazing
+
+# LiDAR pipeline
+open3d               # point cloud I/O + outlier removal filters
+
+# Video assembly
+moviepy
+
+# Note: OpenPCDet and AB3DMOT are not pip-installable in a simple way;
+# install from source per their respective repos once the LiDAR phase
+# starts (see CLAUDE.md build order). PyTorch itself should be installed
+# separately, matched to the CUDA toolkit version on the remote GPU box
+# (verify with scripts/sanity_check_cuda.py before installing anything
+# else, per the Blackwell/sm_120 risk noted in CLAUDE.md).

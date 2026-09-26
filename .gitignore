@@ -1,0 +1,13 @@
+data/raw/
+data/processed/
+data/manifest.json
+data/download_failures.json
+*.zip
+*.z0*
+results/videos/*.mp4
+results/charts/*.png
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.pt
+*.pth
