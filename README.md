@@ -2,11 +2,26 @@
 
 Hackathon project demonstrating that signal-level preprocessing +
 temporal consistency filtering produces measurably more stable, accurate
-object detections from camera and LiDAR data in fog/rain, compared to raw
-pretrained-model output with no preprocessing.
+object detections from camera and LiDAR data in adverse weather, compared
+to raw pretrained-model output with no preprocessing.
 
-See `CLAUDE.md` for full project context, motivation, tech stack, and
-build order.
+**Camera pipeline**: real rain images (ACDC dataset) + real detection
+ground truth.
+**LiDAR pipeline**: real snow point clouds (CADC dataset) + real 3D
+annotations.
+
+See `CLAUDE.md` for full project context, the reasoning behind the
+camera=rain / LiDAR=snow dataset split, tech stack, and build order.
+
+## Current status (2026-09-26)
+
+- [x] ACDC camera data: `rgb_anon_trainvaltest.zip` downloaded, rain
+      subset extracted to `data/processed/rgb_anon/rain/`
+- [x] ACDC detection labels: `gt_detection/` extracted (real COCO-format
+      boxes, not segmentation masks)
+- [ ] CADC LiDAR data: not yet downloaded
+- [ ] Camera pipeline: not yet built
+- [ ] LiDAR pipeline: not yet built
 
 ## Setup (on the remote GPU machine, over SSH)
 
@@ -20,51 +35,46 @@ build order.
    pip install -r requirements.txt
    ```
    (Install PyTorch separately first, matched to your CUDA toolkit
-   version — see the note in `requirements.txt`.)
+   version.)
 
-3. Install `zip`/`unzip` if not already present (needed to reassemble
-   STF's split archives):
+### Camera data (ACDC) — already done, documented here for reference
+
+1. Register at https://acdc.vision.ee.ethz.ch/register, accept terms,
+   request `rgb_anon_trainvaltest.zip` and `gt_detection_trainval.zip`
+   at the packages page.
+2. Download with `wget -c` rather than a browser for the 15.6 GB file —
+   browser downloads of large single files have failed silently before
+   (empty 0-byte result) in this project.
+3. Extract ONLY the rain subset (this is a normal zip, not split, so
+   selective extraction works):
    ```
-   sudo apt-get update && sudo apt-get install -y zip unzip
+   unzip rgb_anon_trainvaltest.zip 'rgb_anon/rain/*' -d data/processed/
+   rm rgb_anon_trainvaltest.zip   # reclaim ~15.6 GB
+   ```
+4. Extract labels:
+   ```
+   unzip gt_detection_trainval.zip -d data/gt_detection/
    ```
 
-4. `data/manifest.json` is already included (472 entries, confirmed valid
-   as of 2026-09-26). **This file is gitignored** — it contains presigned
-   URLs with embedded AWS credentials/tokens and should never be
-   committed. Note: the URLs expire ~5 days from generation
-   (2026-09-26 06:52 UTC) — re-request from STF if working past
-   ~2026-10-01.
+### LiDAR data (CADC) — not yet done
 
-5. Download only what this project's scope needs (camera + LiDAR +
-   ground truth + weather metadata — skips gated-camera sensors, raw
-   history frames, stereo-right, radar, road friction, and precomputed
-   stereo depth, which together make up most of the 472 entries):
-   ```
-   tmux new -s download
-   python scripts/download_data.py --workers 8 \
-     --include cam_stereo_left,lidar_hdl64_last,lidar_hdl64_strongest,calib_cam_stereo_left.json,calib_cam_stereo_right.json,calib_tf_tree_full.json,gt_labels,labeltool_labels,weather_station
-   ```
-   This pulls 50 of the 472 entries. To see all available group names
-   (e.g. if you want to add gated-camera data later):
-   ```
-   python scripts/download_data.py --list-groups
-   ```
-   - Safe to re-run: already-downloaded files are skipped.
-   - If some files fail (network blip, etc.), rerun with:
-     ```
-     python scripts/download_data.py --only-failed
-     ```
-   - To sanity-check on a handful of files first:
-     ```
-     python scripts/download_data.py --include cam_stereo_left --limit 3
-     ```
-
-6. Reassemble and extract the split zip archives:
-   ```
-   python scripts/extract_archives.py --dry-run   # preview first
-   python scripts/extract_archives.py
-   ```
+CADC has no login gate and is organized per-sequence (not one bulk
+archive), so check size before downloading:
+```
+curl -sI "http://wiselab.uwaterloo.ca/cadcd_data/2019_02_27/0002/labeled.zip" | grep -i content-length
+```
+Then download 1-2 sequences with `wget`. See `CLAUDE.md` for the full
+URL pattern and available dates/sequences.
 
 ## Repo layout
 
 See the "Repo structure" section in `CLAUDE.md`.
+
+## Working with Claude Code on this project
+
+This repo is set up so Claude Code can pick up work module-by-module
+using `CLAUDE.md` as its context. See the project's chat history / your
+own notes for the recommended workflow: give it one scoped module at a
+time (e.g. "write data_loader/acdc_camera.py per the CLAUDE.md spec"),
+have it write a smoke test, commit once that passes, then move to the
+next build-order step.
