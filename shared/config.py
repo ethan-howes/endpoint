@@ -219,7 +219,14 @@ class Settings:
     #: Route cost of a dry metre relative to a wet one. Not zero: a long detour
     #: indoors is still a long walk for a rider with a cane, so 10 dry metres cost
     #: as much as 1 wet one. Used both to choose the route and to score it.
-    exposure_dry_cost: float = 0.1
+    #: Was 0.1, which made 10 dry metres cost as much as one wet one -- so a
+    #: route would walk 70 m farther, away from the car and back, under cover or
+    #: indoors to save a few metres of rain. Measured over 25 rider positions
+    #: around the Graham Center: at 0.5 no route overshoots the car by more than
+    #: 7 m, the median walk falls from 35 m to 32 m and the median metres in the
+    #: rain from 17 to 15. A dry metre still costs half a wet one, so cover
+    #: still wins when it is on the way or close to it.
+    exposure_dry_cost: float = 0.5
 
     #: ``score = 1 / (1 + cost / scale)`` with ``cost = wet + dry_cost * dry``.
     #: At 50 m of rain the score is halved; a dry spot at the kerb scores ~1. Keeps
