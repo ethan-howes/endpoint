@@ -230,6 +230,44 @@ class Settings:
     path_connect_radius_m: float = 60.0
     path_connect_k: int = 6
 
+    # --- accessible walking routes (walk_network.py) ---
+    #: A door belongs to a building when it is this close to the building's
+    #: wall: a mapped ``entrance=*`` node, or a footway/path/steps end that stops
+    #: at the wall (an inferred door, since 41 of 67 named FIU buildings have no
+    #: mapped entrance at all).
+    door_snap_m: float = 2.0
+
+    #: Door-to-door through a building is the straight line times this: corridors
+    #: do not run wall to wall. The same 1.3 S1 uses for streets.
+    indoor_detour_factor: float = 1.3
+
+    #: When a building with no ``opening_hours`` tag is assumed open, in local
+    #: time (``demo_tz``). Outside it the building is a wall. Only 2 of 852 FIU
+    #: buildings are tagged, so this is the rule for nearly all of them.
+    building_default_hours: tuple[str, str] = ("07:00", "22:00")
+
+    #: Route-cost penalties, in metres of walking they are "worth". Added to the
+    #: route cost in every mode, so routes avoid them, and to the score, so a spot
+    #: whose best route still has one ranks lower. Steps are a flat cost per
+    #: flight: a two-step flight is no easier with a walker than a ten-step one,
+    #: and with no elevator or ramp data it is the thing to avoid.
+    steps_penalty_m: float = 150.0
+    #: A crossing with a raised kerb at either end, and one where neither end has
+    #: a mapped kerb. FIU mappers recorded ramps, not raised kerbs, so "unknown"
+    #: is mild -- most unknown crossings are probably fine.
+    raised_crossing_penalty_m: float = 60.0
+    unknown_crossing_penalty_m: float = 10.0
+    #: Extra cost per metre of gravel, grass or dirt.
+    unpaved_penalty_ratio: float = 0.5
+
+    #: Score multiplier by ``Spot.curb_access``, applied in every mode. Unknown is
+    #: offered but ranked lower rather than excluded; a lowered kerb loses up to
+    #: ``curb_lowered_decay`` as it approaches ``CURB_RAMP_MAX_DISTANCE_M``.
+    curb_access_factor: dict = field(default_factory=lambda: {
+        "flush": 1.0, "lowered": 1.0, "unknown": 0.8, "raised": 0.6,
+    })
+    curb_lowered_decay: float = 0.1
+
     #: Unchanged from the doc, and for the same reason as ``rain_max_gap_m`` it is
     #: the number that actually matches the data: sun shade is a continuous thing
     #: (a kerb is lit or it is not) rather than a doorway, so 15 m was never at
@@ -349,11 +387,18 @@ out body geom;
     #: disconnected in exactly the places a rider has to cross. Unwalkable classes
     #: (motorways, construction) are dropped at parse time in ``paths.py``, where the
     #: rule can be tested, rather than in query text where it cannot.
+    #:
+    #: Kerb nodes ride along for the accessible route costs: a ``footway=crossing``
+    #: way's end nodes are where it meets the kerb, and ``kerb=lowered|flush|raised``
+    #: on them is what says whether a wheelchair or walker can get across. Around
+    #: FIU they are all mapped as ``barrier=kerb`` nodes on the crossing ways.
     paths_query: str = """
 [out:json][timeout:60];
 (
   way["highway"]({bbox});
   node["entrance"]({bbox});
+  node["barrier"="kerb"]({bbox});
+  node["kerb"]({bbox});
 );
 out body geom;
 """
@@ -521,6 +566,48 @@ BUFFER_BUS_STOP_M: float = 15.0
 #: A stop point must be at least this far from ANY restriction to survive. A
 #: small positive margin stops candidates that sit exactly on a buffer edge.
 MIN_CLEARANCE_M: float = 0.5
+
+#: A lowered or flush kerb counts toward a spot's ``curb_access`` only within
+#: this distance of the stop point, on the same side of the road. Farther than
+#: this, a rider with a walker is stepping off a kerb of unknown height at the
+#: car door, or walking along the gutter to reach it.
+CURB_RAMP_MAX_DISTANCE_M: float = 15.0
+
+#: OSM ``kerb=*`` value -> the three heights that matter to a rider. Shared by
+#: S1 (kerb at the stop point) and S2 (kerbs at each end of a crossing).
+#: ``rolled`` is a sloped kerb a car can mount, not a ramp, and ``yes``/``regular``
+#: say only that a kerb exists, so all three are treated as raised: the cautious
+#: reading for someone with a walker. Values not listed (``barrier=kerb`` with no
+#: height, typos) are skipped, which leaves the spot or crossing ``unknown``.
+KERB_VALUE_KIND: dict[str, str] = {
+    "flush": "flush",
+    "no": "flush",
+    "lowered": "lowered",
+    "raised": "raised",
+    "regular": "raised",
+    "rolled": "raised",
+    "yes": "raised",
+}
+
+#: ``building=*`` values nobody is routed *through*. Homes and residence halls
+#: are locked to non-residents; sheds, garages and construction sites are not
+#: somewhere to walk through; roofs and carports have no walls to be inside. A
+#: rider already inside one of these may still leave by its doors.
+NO_WALKTHROUGH_BUILDINGS: frozenset[str] = frozenset({
+    "house", "detached", "semidetached_house", "terrace", "bungalow", "apartments",
+    "residential", "dormitory", "cabin", "static_caravan", "houseboat", "farm",
+    "shed", "garage", "garages", "carport", "roof", "construction", "hut",
+    "bunker", "greenhouse", "service", "transformer_tower", "water_tower",
+})
+
+#: Open-sided structures: a straight line across one is not "through a wall".
+OPEN_SIDED_BUILDINGS: frozenset[str] = frozenset({"roof", "carport"})
+
+#: ``surface=*`` values that are hard going with a walker or a wheelchair.
+UNPAVED_SURFACES: frozenset[str] = frozenset({
+    "unpaved", "gravel", "fine_gravel", "pebblestone", "dirt", "earth", "ground",
+    "grass", "mud", "sand", "woodchips", "compacted",
+})
 
 #: Straight-line distance to walk, multiplied by this to approximate a street
 #: network detour (ENDPOINT.md section 6 S1 step 5).

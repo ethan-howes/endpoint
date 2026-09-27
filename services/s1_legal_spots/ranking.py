@@ -11,6 +11,7 @@ and makes the tests flaky.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from shared.config import (
@@ -22,9 +23,11 @@ from shared.config import (
     SETTINGS,
 )
 from shared.geo import LocalFrame
-from shared.models import Confidence, LatLng, LegalityBasis, Spot, SpotType
+from shared.models import Confidence, CurbAccess, LatLng, LegalityBasis, Spot, SpotType
 
+from . import curb_access
 from .legality import Verdict
+from .network import Kerb
 
 #: Higher is better, for the dedupe tie-break. The ordering itself lives on
 #: ``Confidence.rank`` in shared/models.py: it is a property of the tier, not of
@@ -99,18 +102,23 @@ def dedupe(scored: list[ScoredCandidate], radius_m: float = DEDUPE_RADIUS_M) -> 
 
 
 def to_spots(
-    frame: LocalFrame, ordered: list[ScoredCandidate], prefix: str = "s1"
+    frame: LocalFrame,
+    ordered: list[ScoredCandidate],
+    prefix: str = "s1",
+    kerbs: Sequence[Kerb] = (),
 ) -> list[Spot]:
     """Build the wire model, assigning the sequential ids ENDPOINT.md shows.
 
     Ids are assigned after sorting and capping, so they are stable for a given
-    rider location and match the documented ``s1_0042`` shape.
+    rider location and match the documented ``s1_0042`` shape. Curb access is
+    assessed here, after the cap, so it costs 30 lookups rather than thousands.
     """
     spots: list[Spot] = []
     for i, sc in enumerate(ordered, start=1):
         cand = sc.verdict.candidate
         road = cand.road
         lat, lng = frame.to_ll(cand.x, cand.y)
+        access, ramp_m, access_source = curb_access.assess(cand, list(kerbs))
 
         notes: list[str] = []
         if not road.width_known:
@@ -119,6 +127,8 @@ def to_spots(
             notes.append("across the street from the rider")
         if sc.verdict.legality and sc.verdict.legality.basis == LegalityBasis.INFERRED_STANDARD:
             notes.append("legality inferred; no parking restriction is mapped")
+        if access is CurbAccess.UNKNOWN:
+            notes.append("no curb ramp or flush curb mapped near this spot")
 
         spots.append(
             Spot(
@@ -141,6 +151,9 @@ def to_spots(
                     if sc.verdict.legality
                     else LegalityBasis.UNKNOWN
                 ),
+                curb_access=access,
+                ramp_distance_m=ramp_m,
+                curb_access_source=access_source,
             )
         )
     return spots
@@ -152,6 +165,7 @@ def rank(
     scored: list[ScoredCandidate],
     radius_m: float = DEFAULT_RADIUS_M,
     max_spots: int = MAX_SPOTS,
+    kerbs: Sequence[Kerb] = (),
 ) -> tuple[list[Spot], int, bool]:
     """Deduplicate, sort, cap. Returns ``(spots, total_before_cap, truncated)``."""
     # Overpass `around:` returns ways with any node in range, so a road can
@@ -167,7 +181,7 @@ def rank(
     ordered = sorted(deduped, key=lambda s: (s.walk_distance_m, s.verdict.candidate.road.way_id))
     total = len(ordered)
     capped = ordered[:max_spots]
-    return to_spots(frame, capped), total, total > len(capped)
+    return to_spots(frame, capped, kerbs=kerbs), total, total > len(capped)
 
 
 __all__ = [

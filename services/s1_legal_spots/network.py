@@ -158,6 +158,27 @@ class ParkingLot:
 
 
 # --------------------------------------------------------------------------- #
+# Kerbs
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class Kerb:
+    """A mapped kerb: where the sidewalk meets the roadway, and how high it is.
+
+    ``on_centerline`` marks the older tagging, ``kerb=*`` placed on a
+    ``highway=crossing`` node in the middle of the road. It describes both ends
+    of the crossing, so it applies to both sides rather than to whichever side a
+    float's sign happens to put it on.
+    """
+
+    node_id: str
+    kind: str  # "flush" | "lowered" | "raised"
+    x: float
+    y: float
+    on_centerline: bool = False
+
+
+# --------------------------------------------------------------------------- #
 # The network document
 # --------------------------------------------------------------------------- #
 
@@ -171,6 +192,7 @@ class StreetNetwork:
     roads: list[Road] = field(default_factory=list)
     restrictions: list[Restriction] = field(default_factory=list)
     lots: list[ParkingLot] = field(default_factory=list)
+    kerbs: list[Kerb] = field(default_factory=list)
     source: str = "osm"
     generated_at: float = 0.0
     endpoint: str = "unknown"
@@ -197,6 +219,7 @@ class StreetNetwork:
         for r in self.restrictions:
             counts[r.kind.value] = counts.get(r.kind.value, 0) + 1
         counts["lots_permitted"] = sum(1 for l in self.lots if l.permitted)
+        counts["kerbs"] = len(self.kerbs)
         return counts
 
     def point_restrictions(self) -> list[Restriction]:
@@ -241,6 +264,7 @@ __all__ = [
     "Road",
     "Restriction",
     "ParkingLot",
+    "Kerb",
     "StreetNetwork",
     "RegulationSource",
     "BUFFER_FIRE_HYDRANT_M",

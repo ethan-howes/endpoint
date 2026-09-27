@@ -584,7 +584,9 @@ class TestNeutralRoute:
         assert body["mode"] == "neutral"
         assert [x["spot"]["spot_id"] for x in body["ranked"]] == ["b", "c", "a"]
         assert all(x["reason"] for x in body["ranked"])
-        assert body["fallbacks_used"] == []
+        # This suite stubs out the walking network, so the only degradation is
+        # the one that says walk distances are S1's estimates.
+        assert body["fallbacks_used"] == ["no walking network; walk distances are S1 estimates"]
 
     def test_a_weather_outage_never_becomes_an_error(self, monkeypatch):
         """The single most likely real failure, and the one ENDPOINT.md's own

@@ -164,6 +164,14 @@ class ShadeBlock:
     kind: Literal["building", "tree"]
     crown_r: float | None = None
     height_estimated: bool = True
+    # --- buildings only, for walking through them (walk_network.py) ---
+    #: The ``building=*`` value: "university", "dormitory", "yes", ...
+    building: str = ""
+    name: str | None = None
+    opening_hours: str = ""
+    access: str = ""
+    #: OSM node ids of the outline, so a mapped entrance on it is a door.
+    node_ids: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind == "tree" and self.crown_r is None:
@@ -426,6 +434,11 @@ def parse_shade(
             ShadeBlock(
                 block_id=el_id, shape=geom, height_m=h, kind="building",
                 height_estimated=est,
+                building=(tags.get("building") or "").strip().lower(),
+                name=tags.get("name"),
+                opening_hours=(tags.get("opening_hours") or "").strip(),
+                access=(tags.get("access") or "").strip().lower(),
+                node_ids=tuple(int(n) for n in (el.get("nodes") or [])),
             )
         )
 

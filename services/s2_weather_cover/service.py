@@ -24,13 +24,17 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
-from shared.config import SETTINGS
+import polyline
+
+from shared.config import CURB_RAMP_MAX_DISTANCE_M, SETTINGS
 from shared.fixtures import cache_key, fixtures_dir, read_fixture
 from shared.geo import LocalFrame, _utm_epsg, expanded_query_bbox, frame_for, tile_bbox, tile_cache_id
 from shared.models import (
     Condition,
     ConditionsResult,
+    CurbAccess,
     LatLng,
     Overlays,
     RankedSpot,
@@ -40,7 +44,7 @@ from shared.models import (
 )
 from shared.osm_cache import OverpassError, read_cache
 
-from . import rain_cover, rain_exposure, scoring, sun_shade, weather
+from . import rain_cover, rain_exposure, scoring, sun_shade, walk_network, weather
 from .cover import (
     Cover,
     CoverMap,
@@ -319,6 +323,8 @@ async def _merge_paths(
     """Every tile's walking network in one frame, ways and entrances deduped by id."""
     ways: list[PathWay] = []
     entrances: dict[int, tuple[float, float]] = {}
+    kerbs: dict[int, str] = {}
+    levels: dict[int, str] = {}
     seen: set[int] = set()
     got = False
     for tile in tiles:
@@ -331,37 +337,125 @@ async def _merge_paths(
                 seen.add(w.way_id)
                 ways.append(w)
         entrances.update(pmap.entrances)
+        kerbs.update(pmap.kerbs)
+        levels.update(pmap.entrance_levels)
     if not got:
         return None
     bbox = (min(t[0] for t in tiles), min(t[1] for t in tiles), max(t[2] for t in tiles), max(t[3] for t in tiles))
-    return PathMap(frame=frame, bbox=bbox, ways=ways, entrances=entrances, cache_id="merged")
+    return PathMap(frame=frame, bbox=bbox, ways=ways, entrances=entrances, cache_id="merged",
+                   kerbs=kerbs, entrance_levels=levels)
 
 
-async def _rank_rain_by_exposure(
-    req: RankRequest,
+async def _walk_network(
     tiles: list[tuple[float, float, float, float]],
     radius: float,
     fallbacks: list[str],
     frame: LocalFrame,
-) -> tuple[list[RankedSpot], CoverMap | None] | None:
-    """The exposure ranking, or None when there is no walking network to rank on.
+) -> tuple[walk_network.Network, CoverMap | None, ShadeMap | None] | None:
+    """The accessible walking network for these tiles, or None without path data.
 
-    Buildings come from the shade document: indoors is dry, and the shade query is
-    already the one that fetches footprints. A missing shade tile only means
-    buildings are not counted as dry, so the ranking still runs on cover alone.
+    Every mode routes over it. Buildings come from the shade document: they are
+    what is dry indoors, what a connector may not cut through, and where doors
+    are. A missing shade tile only means buildings are ignored, so routing still
+    runs on the paths alone.
     """
     path_map = await _merge_paths(tiles, radius, fallbacks, frame)
     if path_map is None or not path_map.ways:
-        fallbacks.append("no walking network; ranked rain by distance to cover")
         return None
     cover_map, shade_map = await _merge_maps(tiles, radius, fallbacks, frame, want_shade=True)
 
-    key = (tuple(sorted(tiles)), _utm_epsg(frame.lat, frame.lng))
+    # Keyed on which documents were present too: a network built while a cover
+    # or shade tile was missing is a degraded one, and must not be reused once
+    # the data arrives.
+    key = (tuple(sorted(tiles)), _utm_epsg(frame.lat, frame.lng),
+           cover_map is not None, shade_map is not None)
     net = _NETWORK_MEMO.get(key)
     if net is None:
-        net = rain_exposure.build_network(path_map, cover_map, shade_map)
+        net = walk_network.build_network(path_map, cover_map, shade_map)
         _NETWORK_MEMO[key] = net
-    return rain_exposure.rank_by_exposure(req.spots, req.rider_location, net, frame), cover_map
+    return net, cover_map, shade_map
+
+
+def _route_factor(route: walk_network.Route | None) -> float:
+    """How much a route's accessibility penalties discount a sun score: the
+    walk factor at the effective length over the walk factor at the real one."""
+    if route is None or route.penalty <= 0:
+        return 1.0
+    return scoring.walk_factor(route.length + route.penalty) / scoring.walk_factor(route.length)
+
+
+def _local(when: datetime) -> datetime:
+    """Pickup time on the demo area's wall clock, which is what building hours use."""
+    return when.astimezone(ZoneInfo(SETTINGS.demo_tz))
+
+
+def _routes(
+    net: walk_network.Network, req: RankRequest, frame: LocalFrame, closed: frozenset[str],
+) -> dict[str, walk_network.Route | None]:
+    """Shortest accessible route, by length, from the rider to every spot."""
+    s = walk_network.search(
+        net, frame.to_m(req.rider_location.lat, req.rider_location.lng),
+        mode="length", closed=closed,
+    )
+    return {
+        spot.spot_id: walk_network.route_to(
+            net, s, frame.to_m(spot.stop_point.lat, spot.stop_point.lng)
+        )
+        for spot in req.spots
+    }
+
+
+def _with_route(r: RankedSpot, route: walk_network.Route | None, frame: LocalFrame) -> RankedSpot:
+    """Attach a route's walk, polyline and notes to a ranked spot."""
+    if route is None:
+        return r
+    return r.model_copy(update={
+        "spot": r.spot.model_copy(update={"walk_distance_m": round(route.length, 1)}),
+        "walk_polyline": polyline.encode(
+            [frame.to_ll(x, y) for x, y in route.points], precision=5
+        ),
+        "indoor_m": round(route.indoor_m, 1),
+        "route_notes": list(route.notes),
+    })
+
+
+def _by_route(
+    spots: list[Spot], routes: dict[str, walk_network.Route | None], reason: str,
+    frame: LocalFrame,
+) -> list[RankedSpot]:
+    """Neutral ranking over real routes: shortest effective walk first, where a
+    route's accessibility penalties count as extra metres."""
+    out = []
+    for s in spots:
+        route = routes.get(s.spot_id)
+        effective = route.length + route.penalty if route else s.walk_distance_m
+        r = RankedSpot(
+            spot=s, wait_point=s.stop_point, score=round(scoring.no_cover_score(effective), 4),
+            confidence=s.confidence, reason=reason,
+        )
+        out.append(_with_route(r, route, frame))
+    out.sort(key=lambda r: (-r.score, r.spot.walk_distance_m, r.spot.spot_id))
+    return out
+
+
+def _curb_factor(spot: Spot) -> float:
+    table = SETTINGS.curb_access_factor
+    factor = float(table.get(spot.curb_access.value, 1.0))
+    if spot.curb_access is CurbAccess.LOWERED and spot.ramp_distance_m is not None:
+        factor -= SETTINGS.curb_lowered_decay * min(spot.ramp_distance_m / CURB_RAMP_MAX_DISTANCE_M, 1.0)
+    return factor
+
+
+def _apply_curb_access(ranked: list[RankedSpot]) -> list[RankedSpot]:
+    """Scale every score by the kerb at the car door, then re-rank.
+
+    Applied last and in every mode, including the fallbacks: a spot with an
+    unknown kerb is still offered, just behind an equally good one with a ramp.
+    The re-sort is stable, so each ranking's own tie-breaks survive.
+    """
+    out = [r.model_copy(update={"score": round(r.score * _curb_factor(r.spot), 4)}) for r in ranked]
+    out.sort(key=lambda r: -r.score)
+    return out
 
 
 def _expanded(
@@ -502,17 +596,35 @@ async def rank(req: RankRequest) -> ConditionsResult:
     shade_source: ShadeSource | None = None
     sun = None
 
-    want_shade = mode is Condition.SUN
+    # The accessible walking network, for every mode. A failure here costs the
+    # routes, never the ranking: each mode below has its pre-network answer.
+    net = None
+    closed: frozenset[str] = frozenset()
+    routes: dict[str, walk_network.Route | None] = {}
+    if req.spots and not (mode is Condition.RAIN and SETTINGS.rain_ranking != "exposure"):
+        try:
+            bundle = await _walk_network(tiles, radius, fallbacks, frame)
+            if bundle is None:
+                fallbacks.append("no walking network; walk distances are S1 estimates")
+            else:
+                net = bundle[0]
+                closed = walk_network.closed_buildings(net, _local(when))
+        except Exception as exc:  # noqa: BLE001
+            log.exception("walking network failed")
+            fallbacks.append(f"walking network error: {type(exc).__name__}")
+            net = None
 
     try:
         if mode is Condition.RAIN:
-            exposure = None
-            if SETTINGS.rain_ranking == "exposure" and req.spots:
-                exposure = await _rank_rain_by_exposure(req, tiles, radius, fallbacks, frame)
-            if exposure is not None:
-                ranked, cover_map = exposure
+            if net is not None:
+                ranked = rain_exposure.rank_by_exposure(
+                    req.spots, req.rider_location, net, frame, closed=closed
+                )
+                cover_map, _ = await _merge_maps(tiles, radius, fallbacks, frame, want_shade=False)
                 overlays = Overlays(cover_features=[c.as_model() for c in (cover_map.covers if cover_map else [])])
             else:
+                if SETTINGS.rain_ranking == "exposure" and req.spots:
+                    fallbacks.append("no walking network; ranked rain by distance to cover")
                 cover_map, _ = await _merge_maps(
                     tiles, radius, fallbacks, frame, want_shade=False
                 )
@@ -528,19 +640,27 @@ async def rank(req: RankRequest) -> ConditionsResult:
             cover_map, shade_map = await _merge_maps(
                 tiles, radius, fallbacks, frame, want_shade=True
             )
+            if net is not None:
+                routes = _routes(net, req, frame, closed)
+            # Sun scoring reads walk_distance_m, so hand it the real route length.
+            sun_spots = [
+                s.model_copy(update={"walk_distance_m": round(routes[s.spot_id].length, 1)})
+                if routes.get(s.spot_id) else s
+                for s in req.spots
+            ]
             if sun is None:
                 fallbacks.append("sun position unavailable")
-                ranked = _by_walk(req.spots, "Could not compute the sun's position")
+                ranked = _by_walk(sun_spots, "Could not compute the sun's position")
             elif shade_map is None:
                 fallbacks.append("no shade geometry")
-                ranked = _by_walk(req.spots, "No shade data for this area")
+                ranked = _by_walk(sun_spots, "No shade data for this area")
             else:
                 later = when + timedelta(minutes=max(req.wait_minutes, 1))
                 sun_later = weather.sun_position(
                     req.rider_location.lat, req.rider_location.lng, later
                 ) or sun
                 ranked, geom = sun_shade.rank_spots(
-                    req.spots, shade_map, cover_map or _empty_covers(shade_map), sun, sun_later
+                    sun_spots, shade_map, cover_map or _empty_covers(shade_map), sun, sun_later
                 )
                 # Only claim a shade source when there *was* shade geometry to
                 # measure with. `rank_spots` returns geom=None for the low-sun
@@ -554,9 +674,21 @@ async def rank(req: RankRequest) -> ConditionsResult:
                     cover_features=[c.as_model() for c in (cover_map.covers if cover_map else [])],
                     shade_geojson=_shade_geojson(geom),
                 )
+            if routes:
+                ranked = [_with_route(r, routes.get(r.spot.spot_id), frame) for r in ranked]
+                # Route penalties (steps, unramped crossings) as a walk-factor
+                # discount: the same effective extra metres neutral mode charges.
+                ranked = [
+                    r.model_copy(update={"score": round(r.score * _route_factor(routes.get(r.spot.spot_id)), 4)})
+                    for r in ranked
+                ]
 
         else:
-            ranked = _by_walk(req.spots, assessment.reason)
+            if net is not None:
+                routes = _routes(net, req, frame, closed)
+                ranked = _by_route(req.spots, routes, assessment.reason, frame)
+            else:
+                ranked = _by_walk(req.spots, assessment.reason)
 
     except Exception as exc:  # noqa: BLE001 - §6: a data problem is not an error
         log.exception("ranking raised in %s mode", mode.value)
@@ -567,24 +699,24 @@ async def rank(req: RankRequest) -> ConditionsResult:
 
     if not ranked and req.spots:
         ranked = _by_walk(req.spots, assessment.reason)
+    ranked = _apply_curb_access(ranked)
 
     nearest_id = min(
         req.spots, key=lambda s: (s.walk_distance_m, s.spot_id)
     ).spot_id if req.spots else None
 
     needs_confirm = False
-    if ranked and ranked[0].wet_m is not None:
-        # Exposure ranking: ranked walks are real route lengths, so compare the
-        # winner against the shortest real walk among them, not S1's estimate.
-        shortest = min(r.spot.walk_distance_m for r in ranked)
+    protected = ranked and (ranked[0].wet_m is not None or ranked[0].cover_feature is not None)
+    if protected and mode is not Condition.NEUTRAL:
+        if any(r.walk_polyline for r in ranked):
+            # Real route lengths: compare the winner with the shortest real walk
+            # among the candidates, not with S1's straight-line estimate.
+            shortest = min(r.spot.walk_distance_m for r in ranked)
+        else:
+            shortest = next(
+                (s.walk_distance_m for s in req.spots if s.spot_id == nearest_id), 0.0
+            )
         needs_confirm = scoring.needs_detour_confirmation(ranked[0].spot.walk_distance_m, shortest)
-    elif ranked and ranked[0].cover_feature is not None and nearest_id:
-        nearest_walk = next(
-            (s.walk_distance_m for s in req.spots if s.spot_id == nearest_id), 0.0
-        )
-        needs_confirm = scoring.needs_detour_confirmation(
-            ranked[0].spot.walk_distance_m, nearest_walk
-        )
 
     return ConditionsResult(
         weather=assessment.report,

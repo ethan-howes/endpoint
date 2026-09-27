@@ -29,6 +29,7 @@ from shared.config import (
     CYCLEWAY_WIDTH_M,
     DEFAULT_WIDTH_BY_HIGHWAY,
     IN_LANE_CYCLEWAY_VALUES,
+    KERB_VALUE_KIND,
     LANE_WIDTH_M,
     NON_OBSTRUCTING_CYCLEWAY_VALUES,
     PARKING_LANE_WIDTH_M,
@@ -41,7 +42,7 @@ from shared.geo import LocalFrame, Polyline, expanded_query_bbox, tile_cache_id
 from shared.models import RestrictionKind
 from shared.osm_cache import afetch_overpass, cache_info
 
-from .network import ParkingLot, Restriction, Road, StreetNetwork
+from .network import Kerb, ParkingLot, Restriction, Road, StreetNetwork
 
 #: Highways worth fetching. Wider than ENDPOINT.md section 6 S1's list because a
 #: campus pickup often happens on a service road or the edge of a pedestrian
@@ -68,6 +69,14 @@ def build_road_query(bbox: tuple[float, float, float, float]) -> str:
 
 
 def build_point_query(bbox: tuple[float, float, float, float]) -> str:
+    """Restrictions, parking, and the kerb nodes that decide ``Spot.curb_access``.
+
+    Kerbs are ``barrier=kerb`` nodes, usually carrying ``kerb=lowered|flush|raised``;
+    a bare ``kerb=*`` on a crossing node is the older form of the same fact, so
+    both are selected. Accessible parking spaces are fetched here too, as their
+    own polygons, because they are the one place a mapped kerb-free pickup is
+    guaranteed by the tag rather than inferred.
+    """
     s, w, n, e = bbox
     return (
         f"[out:json][timeout:60];\n"
@@ -75,6 +84,9 @@ def build_point_query(bbox: tuple[float, float, float, float]) -> str:
         f'  node["emergency"="fire_hydrant"]({s},{w},{n},{e});\n'
         f'  node["highway"~"^(crossing|bus_stop|traffic_signals|stop)$"]({s},{w},{n},{e});\n'
         f'  way["amenity"="parking"]({s},{w},{n},{e});\n'
+        f'  node["barrier"="kerb"]({s},{w},{n},{e});\n'
+        f'  node["kerb"]({s},{w},{n},{e});\n'
+        f'  way["amenity"="parking_space"]["parking_space"="disabled"]({s},{w},{n},{e});\n'
         ");\n"
         f"out body geom;"
     )
@@ -474,6 +486,32 @@ def _detect_intersections(roads: list[Road]) -> list[Restriction]:
     return out
 
 
+def parse_kerbs(payload: dict[str, Any], frame: LocalFrame) -> list[Kerb]:
+    """Kerb nodes with a known height, in meters.
+
+    A kerb value on a ``highway=crossing`` node is the older tagging for both
+    ends of the crossing, and the node sits on the road centreline, so it is
+    flagged rather than assigned to a side.
+    """
+    kerbs: list[Kerb] = []
+    for el in payload.get("elements", []):
+        if el.get("type") != "node" or el.get("lat") is None or el.get("lon") is None:
+            continue
+        tags = el.get("tags") or {}
+        kind = KERB_VALUE_KIND.get((tags.get("kerb") or "").strip().lower())
+        if kind is None:
+            continue
+        x, y = frame.to_m(float(el["lat"]), float(el["lon"]))
+        kerbs.append(Kerb(
+            node_id=f"node/{el['id']}",
+            kind=kind,
+            x=x,
+            y=y,
+            on_centerline=(tags.get("highway") or "").strip().lower() == "crossing",
+        ))
+    return kerbs
+
+
 #: ``access``-style keys that gate who may use a parking lot.
 _LOT_ACCESS_KEYS = ("access", "motor_vehicle", "motorcar", "vehicle")
 
@@ -578,6 +616,7 @@ class OsmRegulationSource:
             roads=roads,
             restrictions=restrictions,
             lots=lots,
+            kerbs=parse_kerbs(point_payload, frame),
             source=self.name,
             generated_at=time.time(),
             endpoint=info.endpoint if info else SETTINGS.overpass_mirrors[0],

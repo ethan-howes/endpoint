@@ -121,6 +121,21 @@ class RestrictionKind(str, Enum):
     BUS_STOP = "bus_stop"
 
 
+class CurbAccess(str, Enum):
+    """How a rider gets between the sidewalk and the car at a stop point.
+
+    From OSM ``kerb=*`` on ``barrier=kerb`` nodes within
+    ``CURB_RAMP_MAX_DISTANCE_M`` on the same side of the road. ``UNKNOWN`` means
+    nothing is mapped there, NOT that there is no ramp: around FIU mappers
+    recorded ramps and flush kerbs but no raised ones, so absence is uninformative.
+    """
+
+    FLUSH = "flush"
+    LOWERED = "lowered"
+    RAISED = "raised"
+    UNKNOWN = "unknown"
+
+
 class ShadeSource(str, Enum):
     GOOGLE_SOLAR = "google_solar"
     OSM_GEOMETRY = "osm_geometry"
@@ -248,6 +263,12 @@ class Spot(BaseModel):
     #: we can tell a rider, and it is the sane tie-break when deduplicating.
     clearance_m: float | None = Field(default=None, ge=0.0)
     legality_basis: LegalityBasis = LegalityBasis.UNKNOWN
+    #: Kerb between the sidewalk and the car door. See ``CurbAccess``.
+    curb_access: CurbAccess = CurbAccess.UNKNOWN
+    #: Distance to the kerb that decided ``curb_access``; None when unknown.
+    ramp_distance_m: float | None = Field(default=None, ge=0.0)
+    #: Where ``curb_access`` came from (``"osm"``), or None when unknown.
+    curb_access_source: str | None = None
 
     @field_validator("curb_bearing_deg")
     @classmethod
@@ -373,6 +394,14 @@ class RankedSpot(BaseModel):
     #: (precision 5, lat/lng). The route the exposure was measured along, so a UI
     #: can draw exactly the path the rider was scored on.
     walk_polyline: str | None = None
+
+    # --- accessible walking routes (walk_network.py), all optional ---
+    #: Metres of the walk inside a building (door to door). None when S2 had no
+    #: walking network for this ride.
+    indoor_m: float | None = None
+    #: Plain-language facts about the route: "through Ernest R. Graham Center",
+    #: "route includes steps", "2 crossings with no mapped curb ramp".
+    route_notes: list[str] = Field(default_factory=list)
 
 
 class SunPosition(BaseModel):
