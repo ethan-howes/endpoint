@@ -542,17 +542,10 @@ def _links(net: Network, at: XY, *, rider: bool) -> tuple[list[Link], str | None
     if inside:
         b = inside[0]
         out = []
-        inner = b.shape.buffer(1.0)
         for dnode in b.doors:
             p = net.xy[net.index[dnode]]
-            leg = LineString([at, tuple(p)])
-            # Straight to a door only if the line stays indoors. In a concave
-            # building (the Graham Center) the straight line to a far door can
-            # leave through a wall, cross the car park -- past the car -- and
-            # come back in, which is neither a walk anyone takes nor dry.
-            if leg.difference(inner).length > 1.0:
-                continue
-            out.append(Link(dnode, leg.length, leg.length))  # indoors: dry
+            length = math.hypot(p[0] - at[0], p[1] - at[1])
+            out.append(Link(dnode, length, length))  # indoors: dry
         out += _exit_links(net, at, b)
         if out:
             return out, None
@@ -592,8 +585,6 @@ class Search:
     note: str | None = None
     #: The rider's own snap links, for a stop on the same segment.
     rider_links: list[Link] = field(default_factory=list)
-    #: The building the rider starts inside, if any.
-    inside: Building | None = None
 
 
 def search(net: Network, rider_xy: XY, *, mode: Mode = "rain",
@@ -621,8 +612,7 @@ def search(net: Network, rider_xy: XY, *, mode: Mode = "rain",
             if e.to not in best or c < best[e.to].cost:
                 best[e.to] = _Reach(c, n, e)
                 heapq.heappush(heap, (c, e.to))
-    inside = net.buildings_containing(rider_xy)
-    return Search(best, rider_xy, mode, closed, note, links, inside[0] if inside else None)
+    return Search(best, rider_xy, mode, closed, note, links)
 
 
 @dataclass
@@ -666,36 +656,6 @@ def _same_segment(net: Network, s: Search, stop_links: list[Link]) -> tuple[floa
     return best
 
 
-def _straight_out(net: Network, s: Search, stop_xy: XY) -> tuple[float, list[Edge], list[XY]] | None:
-    """A rider inside a building walking straight out toward the car, through the
-    side of the building that faces it, as if by a door nobody mapped.
-
-    Only for a car within ``open_ground_radius_m``, and only through the rider's
-    own building: the line may cross no other wall, steps or mapped crossing.
-    Costs ``nearest_side_exit_penalty_m`` like any unmapped exit, so a mapped
-    door on that side still wins. Without it, "nearest side" meant nearest to
-    the rider, and a rider 18 m from the car was sent 89 m round to a door.
-    """
-    b = s.inside
-    if b is None:
-        return None
-    rx, ry = s.rider_xy
-    length = math.hypot(stop_xy[0] - rx, stop_xy[1] - ry)
-    if length > SETTINGS.open_ground_radius_m or length < 1e-6:
-        return None
-    if _wall_cut(net, s.rider_xy, stop_xy, ignore=b.shape) > _WALL_TOLERANCE_M:
-        return None
-    line = LineString([s.rider_xy, stop_xy])
-    if net.barriers is not None and line.difference(b.shape).intersects(net.barriers):
-        return None
-    dry = min(float(line.intersection(b.shape).length), length)
-    pen = SETTINGS.nearest_side_exit_penalty_m
-    edge = Edge(-4, length, dry, pen, "wall_exit")
-    # The stop is appended by the caller; hand back the rider alone and let the
-    # final leg carry the whole straight walk.
-    return _cost(s.mode, length, dry, pen), [edge], [s.rider_xy]
-
-
 def route_to(net: Network, s: Search, stop_xy: XY) -> Route | None:
     """The cheapest route to ``stop_xy``, or None when the stop is off the network."""
     links, link_note = _links(net, stop_xy, rider=False)
@@ -709,24 +669,16 @@ def route_to(net: Network, s: Search, stop_xy: XY) -> Route | None:
             best = (c, lk)
 
     direct = _same_segment(net, s, links)
-    exit_direct = _straight_out(net, s, stop_xy)
-    if exit_direct is not None and (
-        (best is None or exit_direct[0] < best[0]) and (direct is None or exit_direct[0] < direct[0])
-    ):
-        direct, best = exit_direct, None
     if best is None and direct is None:
         return None
 
     nodes: list[int] = []
     if direct is not None and (best is None or direct[0] <= best[0]):
         cost, edges, pts = direct
-        if edges and edges[0].to == -4:  # straight out: the edge is the whole walk
-            pts = pts + [stop_xy]
-        else:
-            last_leg = math.hypot(stop_xy[0] - pts[-1][0], stop_xy[1] - pts[-1][1])
-            edges = edges + [Edge(-2, last_leg, 0.0)]
-            cost += _cost(s.mode, last_leg, 0.0, 0.0)
-            pts = pts + [stop_xy]
+        last_leg = math.hypot(stop_xy[0] - pts[-1][0], stop_xy[1] - pts[-1][1])
+        edges = edges + [Edge(-2, last_leg, 0.0)]
+        cost += _cost(s.mode, last_leg, 0.0, 0.0)
+        pts = pts + [stop_xy]
     else:
         cost, lk = best
         edges, first_via = [], None
@@ -758,12 +710,6 @@ def route_to(net: Network, s: Search, stop_xy: XY) -> Route | None:
     if raw_len > 0 and clean_len < raw_len - 0.01:
         scale = clean_len / raw_len
         length, dry = length * scale, min(dry * scale, length * scale)
-    short = _shortcut_to_stop(net, pts)
-    if short is not None:
-        pts = short
-        legs = list(zip(pts, pts[1:]))
-        length = _polyline_length(pts)
-        dry = min(float(_overlap_lengths(legs, net.dry).sum()), length)
     indoor = sum(e.length for e in edges if e.flag == "indoor")
     penalty = sum(e.penalty for e in edges)
 
@@ -812,40 +758,6 @@ def _ramps_on(net: Network, pts: list[XY]) -> list[XY]:
     near = shapely.distance(shapely.points(xy), line) <= 0.5
     hits = [tuple(p) for p, ok in zip(xy, near) if ok]
     return sorted(hits, key=lambda p: line.project(Point(p)))
-
-
-def _shortcut_to_stop(net: Network, pts: list[XY], slack_m: float = 2.0) -> list[XY] | None:
-    """End the walk where it comes closest to the car, if walking straight from
-    there is shorter and crosses no wall, steps or mapped crossing.
-
-    A safety net for detours past the car and back that no single vertex shows
-    (so ``_despike`` cannot see them): the route passes near the stop, carries
-    on to a node beyond it, and returns. Returns None when no shortcut applies.
-    """
-    if len(pts) < 3:
-        return None
-    stop = Point(pts[-1])
-    body = LineString(pts[:-1])
-    along = body.project(stop)
-    p = body.interpolate(along)
-    remaining = (body.length - along) + math.hypot(pts[-1][0] - pts[-2][0], pts[-1][1] - pts[-2][1])
-    direct = p.distance(stop)
-    if remaining <= direct + slack_m or direct > SETTINGS.open_ground_radius_m:
-        return None
-    if _wall_cut(net, (p.x, p.y), pts[-1]) > _WALL_TOLERANCE_M:
-        return None
-    if net.barriers is not None and direct > 1.0:
-        inner = shapely.ops.substring(LineString([(p.x, p.y), pts[-1]]), 0.5, direct - 0.5)
-        if net.barriers.intersects(inner):
-            return None
-    kept, walked = [pts[0]], 0.0
-    for a, b in zip(pts, pts[1:-1]):
-        seg = math.hypot(b[0] - a[0], b[1] - a[1])
-        if walked + seg >= along:
-            break
-        kept.append(b)
-        walked += seg
-    return kept + [(p.x, p.y), pts[-1]]
 
 
 def _polyline_length(pts: list[XY]) -> float:

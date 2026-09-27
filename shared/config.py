@@ -260,9 +260,7 @@ class Settings:
     #: one-sided: all 12 doors found on the Ernest R. Graham Center are on its
     #: west and south walls, so a rider on the east side was routed ~280 m for a
     #: kerb ~45 m away.
-    #: 25, not 40: in rain mode indoor metres are cheap, and at 40 a far mapped
-    #: door beat walking straight out toward a car 18 m away.
-    nearest_side_exit_penalty_m: float = 25.0
+    nearest_side_exit_penalty_m: float = 40.0
 
     #: Door-to-door through a building is the straight line times this: corridors
     #: do not run wall to wall. The same 1.3 S1 uses for streets.
