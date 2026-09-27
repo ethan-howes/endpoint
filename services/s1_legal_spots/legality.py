@@ -252,14 +252,12 @@ def judge_candidate(
             clearance_m=clearance,
         )
 
-    # Confidence: S1 caps at LIKELY. An explicit permissive tag or a strong
-    # structural inference earns it; nothing else does. VERIFIED and DETECTED
-    # belong to official sources and S3 respectively, and are unreachable here.
-    strong_inference = (
-        road.width_known
-        and road.highway in {"residential", "unclassified", "living_street", "tertiary", "secondary"}
-    )
-    if legality.basis == LegalityBasis.TAGGED_PERMISSIVE or strong_inference:
+    # Confidence: S1 caps at LIKELY, and only an explicit permissive parking tag
+    # earns it (ENDPOINT.md section 6 S1 step 3). An earlier version also gave
+    # it to any road with a `lanes` tag, but how many lanes a road has says
+    # nothing about whether stopping is allowed. VERIFIED and DETECTED belong to
+    # official sources and S3 respectively, and are unreachable here.
+    if legality.basis == LegalityBasis.TAGGED_PERMISSIVE:
         confidence = Confidence.LIKELY
     else:
         confidence = Confidence.UNVERIFIED

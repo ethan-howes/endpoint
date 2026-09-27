@@ -30,6 +30,11 @@ from shared.config import (
     DEFAULT_WIDTH_BY_HIGHWAY,
     IN_LANE_CYCLEWAY_VALUES,
     KERB_VALUE_KIND,
+    NO_STOP_SERVICE_VALUES,
+    ON_KERB_PARKING_VALUES,
+    VEHICLE_ACCESS_ALLOW,
+    VEHICLE_ACCESS_DENY,
+    VEHICLE_ACCESS_KEYS,
     LANE_WIDTH_M,
     NON_OBSTRUCTING_CYCLEWAY_VALUES,
     PARKING_LANE_WIDTH_M,
@@ -196,11 +201,38 @@ def _cycleway_obstructs(tags: dict[str, str], side: str, oneway: bool) -> tuple[
 
 
 def _has_parking_lane(tags: dict[str, str], side: str) -> bool:
+    """A parking lane in the roadway on ``side``, which moves that kerb outward.
+    On-kerb parking sits on the footway and does not."""
     for key in (f"parking:lane:{side}", f"parking:{side}"):
         raw = (tags.get(key) or "").strip().lower()
-        if raw in PERMISSIVE_PARKING_VALUES:
+        if raw in PERMISSIVE_PARKING_VALUES and raw not in ON_KERB_PARKING_VALUES:
             return True
     return False
+
+
+def road_stoppable(tags: dict[str, str]) -> tuple[bool, str]:
+    """May a robotaxi stop on this road to pick up a member of the public?
+
+    ``(False, reason)`` for a pedestrian street or plaza (unless tagged open to
+    cars), a drive-through, emergency route or car-park aisle, or a road whose
+    vehicle access excludes the public. Access is read from the most specific
+    key down, so ``access=private`` + ``motor_vehicle=destination`` is allowed.
+    """
+    highway = (tags.get("highway") or "").strip().lower()
+    if (tags.get("area") or "").strip().lower() == "yes":
+        return False, "area=yes (a plaza, not a street)"
+    service = (tags.get("service") or "").strip().lower()
+    if service in NO_STOP_SERVICE_VALUES:
+        return False, f"service={service}"
+    for key in VEHICLE_ACCESS_KEYS:
+        raw = (tags.get(key) or "").strip().lower()
+        if raw in VEHICLE_ACCESS_DENY:
+            return False, f"{key}={raw}"
+        if raw in VEHICLE_ACCESS_ALLOW:
+            return True, ""
+    if highway == "pedestrian":
+        return False, "highway=pedestrian with no motor-vehicle access"
+    return True, ""
 
 
 def estimate_offsets(tags: dict[str, str]) -> tuple[float, float, bool]:
@@ -294,6 +326,7 @@ def parse_roads(payload: dict[str, Any], frame: LocalFrame) -> list[Road]:
 
         oneway, reversed_ = parse_oneway(tags)
         left, right, known = estimate_offsets(tags)
+        stoppable, why = road_stoppable(tags)
 
         roads.append(
             Road(
@@ -310,6 +343,8 @@ def parse_roads(payload: dict[str, Any], frame: LocalFrame) -> list[Road]:
                 lanes=parse_lanes(tags.get("lanes")),
                 nodes=tuple(str(n) for n in nodes),
                 tags=tags,
+                stoppable=stoppable,
+                unstoppable_reason=why,
             )
         )
     return roads
@@ -512,6 +547,24 @@ def parse_kerbs(payload: dict[str, Any], frame: LocalFrame) -> list[Kerb]:
     return kerbs
 
 
+def parse_accessible_spaces(payload: dict[str, Any], frame: LocalFrame) -> list[tuple[str, Any]]:
+    """``parking_space=disabled`` polygons: ``[(way id, Polygon in meters)]``."""
+    from shapely.geometry import Polygon
+
+    out = []
+    for el in payload.get("elements", []):
+        tags = el.get("tags") or {}
+        if el.get("type") != "way" or (tags.get("parking_space") or "").strip().lower() != "disabled":
+            continue
+        coords = _clean_coords(el.get("geometry") or [])
+        if coords is None or len(coords) < 3:
+            continue
+        poly = Polygon([frame.to_m(la, lo) for la, lo in coords]).buffer(0)
+        if not poly.is_empty:
+            out.append((f"way/{el['id']}", poly))
+    return out
+
+
 #: ``access``-style keys that gate who may use a parking lot.
 _LOT_ACCESS_KEYS = ("access", "motor_vehicle", "motorcar", "vehicle")
 
@@ -617,6 +670,7 @@ class OsmRegulationSource:
             restrictions=restrictions,
             lots=lots,
             kerbs=parse_kerbs(point_payload, frame),
+            accessible_spaces=parse_accessible_spaces(point_payload, frame),
             source=self.name,
             generated_at=time.time(),
             endpoint=info.endpoint if info else SETTINGS.overpass_mirrors[0],

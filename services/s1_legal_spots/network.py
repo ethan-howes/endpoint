@@ -69,6 +69,12 @@ class Road:
     #: the source did not return them, which disables intersection detection.
     nodes: tuple[str, ...] = ()
     tags: dict[str, str] = field(default_factory=dict)
+    #: False for roads a car may not stop on (private, drive-through, car-park
+    #: aisle, pedestrian street). Kept in the network rather than dropped: their
+    #: junctions with public streets still exclude the kerb there, and a
+    #: crossing or bus stop may still project onto them.
+    stoppable: bool = True
+    unstoppable_reason: str = ""
 
     def offset_for(self, side: str) -> float:
         return self.left_offset_m if side == "left" else self.right_offset_m
@@ -193,6 +199,8 @@ class StreetNetwork:
     restrictions: list[Restriction] = field(default_factory=list)
     lots: list[ParkingLot] = field(default_factory=list)
     kerbs: list[Kerb] = field(default_factory=list)
+    #: ``amenity=parking_space`` + ``parking_space=disabled`` polygons, in meters.
+    accessible_spaces: list[tuple[str, object]] = field(default_factory=list)
     source: str = "osm"
     generated_at: float = 0.0
     endpoint: str = "unknown"

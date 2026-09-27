@@ -46,11 +46,13 @@ from shared.osm_cache import OverpassError, cache_info, read_cache
 
 from .curb import generate_candidates
 from .legality import Verdict, explain_restriction_counts, judge_candidate
+from .lots import lot_stops
 from .network import StreetNetwork
 from .overpass import (
     OsmRegulationSource,
     build_point_query,
     build_road_query,
+    parse_accessible_spaces,
     parse_kerbs,
     parse_lots,
     parse_restrictions,
@@ -120,6 +122,7 @@ def parse_network(
         restrictions=parse_restrictions(point_payload, frame, roads),
         lots=parse_lots(point_payload, frame),
         kerbs=parse_kerbs(point_payload, frame),
+        accessible_spaces=parse_accessible_spaces(point_payload, frame),
         source="osm",
         generated_at=time.time(),
         endpoint="cache",
@@ -288,9 +291,11 @@ async def legal_spots(req: LegalSpotsRequest) -> LegalSpotsResponse:
         schedule_refresh(tile, radius)
 
     scored = _score_all(fetch.network, req.rider_location)
+    net = fetch.network
     spots, total, truncated = rank(
-        fetch.network.frame, req.rider_location, scored, radius_m=radius,
-        kerbs=fetch.network.kerbs,
+        net.frame, req.rider_location, scored, radius_m=radius, kerbs=net.kerbs,
+        lot_stops=lot_stops(net, net.frame.to_m(req.rider_location.lat, req.rider_location.lng), radius),
+        network=net,
     )
 
     return LegalSpotsResponse(
@@ -397,7 +402,8 @@ def explain(req: LegalSpotsRequest) -> SpotsExplainResponse:
             )
 
     spots, _, _ = rank(
-        net.frame, req.rider_location, accepted_scored, radius_m=radius, kerbs=net.kerbs
+        net.frame, req.rider_location, accepted_scored, radius_m=radius, kerbs=net.kerbs,
+        lot_stops=lot_stops(net, (rx, ry), radius), network=net,
     )
     rejected.sort(key=lambda r: (r.reason, r.walk_distance_m))
 

@@ -25,9 +25,10 @@ from shared.config import (
 from shared.geo import LocalFrame
 from shared.models import Confidence, CurbAccess, LatLng, LegalityBasis, Spot, SpotType
 
-from . import curb_access
+from . import curb_access, lots
 from .legality import Verdict
-from .network import Kerb
+from .lots import LotStop
+from .network import Kerb, StreetNetwork
 
 #: Higher is better, for the dedupe tie-break. The ordering itself lives on
 #: ``Confidence.rank`` in shared/models.py: it is a property of the tier, not of
@@ -166,8 +167,14 @@ def rank(
     radius_m: float = DEFAULT_RADIUS_M,
     max_spots: int = MAX_SPOTS,
     kerbs: Sequence[Kerb] = (),
+    lot_stops: Sequence[LotStop] = (),
+    network: StreetNetwork | None = None,
 ) -> tuple[list[Spot], int, bool]:
-    """Deduplicate, sort, cap. Returns ``(spots, total_before_cap, truncated)``."""
+    """Deduplicate, sort, cap. Returns ``(spots, total_before_cap, truncated)``.
+
+    Kerb candidates and parking-lot stops compete on walk distance for the same
+    ``max_spots`` slots, and ids are assigned over the merged order.
+    """
     # Overpass `around:` returns ways with any node in range, so a road can
     # contribute candidates well outside the requested radius. Filter explicitly.
     rx, ry = frame.to_m(rider.lat, rider.lng)
@@ -178,10 +185,23 @@ def rank(
     ]
 
     deduped = dedupe(in_radius)
-    ordered = sorted(deduped, key=lambda s: (s.walk_distance_m, s.verdict.candidate.road.way_id))
-    total = len(ordered)
-    capped = ordered[:max_spots]
-    return to_spots(frame, capped, kerbs=kerbs), total, total > len(capped)
+    merged: list[tuple[float, int, str, object]] = [
+        (sc.walk_distance_m, 0, sc.verdict.candidate.road.way_id, sc) for sc in deduped
+    ]
+    if network is not None:
+        merged += [(ls.walk_m, 1, ls.lot_id, ls) for ls in lot_stops]
+    merged.sort(key=lambda t: t[:3])
+    total = len(merged)
+    capped = merged[:max_spots]
+
+    spots: list[Spot] = []
+    for i, (_, kind, _, item) in enumerate(capped, start=1):
+        sid = f"s1_{i:04d}"
+        if kind == 0:
+            spots.append(to_spots(frame, [item], kerbs=kerbs)[0].model_copy(update={"spot_id": sid}))
+        else:
+            spots.append(lots.to_spot(frame, network, item, sid))
+    return spots, total, total > len(capped)
 
 
 __all__ = [

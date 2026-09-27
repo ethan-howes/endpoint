@@ -670,8 +670,41 @@ PERMISSIVE_PARKING_VALUES: frozenset[str] = frozenset(
         "undivided",
         "marked",
         "street",
+        # ENDPOINT.md section 6 S1 step 3 names ``parking:<side>=lane`` outright;
+        # the rest are the current parking-scheme values for a kerbside lane.
+        "lane",
+        "on_kerb",
+        "half_on_kerb",
+        "shoulder",
     }
 )
+
+#: Parking values that sit on the footway rather than in the roadway, so they do
+#: not push the kerb outward when estimating road width.
+ON_KERB_PARKING_VALUES: frozenset[str] = frozenset({"on_kerb", "half_on_kerb"})
+
+# --------------------------------------------------------------------------- #
+# Roads a car may not stop on at all
+# --------------------------------------------------------------------------- #
+
+#: ``service=*`` values where a pickup stop is wrong: a drive-through lane, an
+#: emergency route, or a car-park aisle (parked cars both sides, no kerb -- a lot
+#: is offered as one ``parking_lot`` spot instead).
+NO_STOP_SERVICE_VALUES: frozenset[str] = frozenset(
+    {"drive-through", "emergency_access", "parking_aisle"}
+)
+
+#: Vehicle access values that exclude a robotaxi picking up a member of the
+#: public. Read from the most specific key down: motorcar, motor_vehicle,
+#: vehicle, access.
+VEHICLE_ACCESS_DENY: frozenset[str] = frozenset(
+    {"no", "private", "customers", "delivery", "agricultural", "forestry",
+     "emergency", "bus", "psv", "permit"}
+)
+VEHICLE_ACCESS_ALLOW: frozenset[str] = frozenset(
+    {"yes", "designated", "permissive", "destination", "public"}
+)
+VEHICLE_ACCESS_KEYS: tuple[str, ...] = ("motorcar", "motor_vehicle", "vehicle", "access")
 
 #: Values that forbid passenger pickup, or restrict it to someone else
 #: (customers, permit holders, buses, taxis). A robotaxi picking up a
