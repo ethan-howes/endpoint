@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Video I/O outputs: large binaries, regenerate with scripts/run_segmentation.py
+results/videos/*.mp4
+results/videos/*.png
+
+# Self-test inputs: fetched by scripts/self_test.py, provenance in CREDITS.md
+assets/samples/*.jpg
+
+# Model weights
+*.pt
+*.pth
+*.safetensors

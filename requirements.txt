@@ -1,0 +1,11 @@
+# Core
+numpy
+opencv-python-headless    # headless build: no X11/GUI deps, cv2.imshow unused
+scipy                     # required by transformers' Mask2FormerLoss at model init
+
+# Model. Pinned loosely: Mask2Former needs a torch/torchvision pair, and
+# transformers 5.x image processors import torchvision.transforms.v2, so let
+# the resolver pair torch+torchvision rather than pinning by hand.
+torch
+torchvision
+transformers

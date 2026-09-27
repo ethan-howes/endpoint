@@ -1,0 +1,43 @@
+{
+  "clip": "/home/yart/projects/endpoint/results/videos/selftest_clip.mp4",
+  "models": {
+    "mapillary": {
+      "repo": "facebook/mask2former-swin-large-mapillary-vistas-semantic",
+      "road_class_ids": [
+        13,
+        14
+      ],
+      "road_class_names": [
+        "Road",
+        "Service Lane"
+      ],
+      "num_labels": 65,
+      "load_seconds": 0.81,
+      "coverage": {
+        "dashcam_road": 0.2138,
+        "i95_exit": 0.1651,
+        "i75_offramp": 0.0567
+      },
+      "clip_throughput_fps": 11.88,
+      "clip_mean_coverage": 0.126
+    },
+    "cityscapes": {
+      "repo": "facebook/mask2former-swin-large-cityscapes-semantic",
+      "road_class_ids": [
+        0
+      ],
+      "road_class_names": [
+        "road"
+      ],
+      "num_labels": 19,
+      "load_seconds": 0.63,
+      "coverage": {
+        "dashcam_road": 0.2262,
+        "i95_exit": 0.1879,
+        "i75_offramp": 0.0626
+      },
+      "clip_throughput_fps": 12.18,
+      "clip_mean_coverage": 0.1428
+    }
+  }
+}
