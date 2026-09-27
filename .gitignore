@@ -39,3 +39,25 @@ logs/
 *.swp
 .idea/
 .vscode/
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Video I/O outputs: large binaries, regenerate with scripts/run_segmentation.py
+results/videos/*.mp4
+results/videos/*.png
+
+# Self-test inputs: fetched by scripts/self_test.py, provenance in CREDITS.md
+assets/samples/*.jpg
+
+# Model weights
+*.pt
+*.pth
+*.safetensors
+
+# Secrets: local API keys. Deliberately slash-free so these match at any depth.
+# The results/ and assets/ patterns above are repo-root-anchored, which is why
+# they never match anything under src/ -- do not copy that mistake here.
+secrets.env
+.env
