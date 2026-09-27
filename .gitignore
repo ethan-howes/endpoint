@@ -1,3 +1,44 @@
+# Secrets. Never commit.
+.env
+.env.local
+
+# Virtualenv
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Overpass response cache (ENDPOINT.md section 8: "gitignored except demo
+# fixtures"). The committed demo fixtures live in
+# services/s1_legal_spots/fixtures/ and services/s2_weather_cover/fixtures/,
+# where they are versioned deliberately; this cache is the throwaway working
+# copy keyed by query hash.
+data/cache/
+
+# Fetched imagery and derived rasters. Large, regenerable, and not what anyone
+# reviewing a diff is looking for.
+data/cache/images/
+data/cache/routes/
+*.tif
+*.npy
+*.npz
+
+# Run logs from local dev servers and fixture capture. Transient by definition,
+# and uvicorn embeds a timestamp in every line, so committing them turns any log
+# change into a diff nobody can read.
+logs/
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
 .venv/
 __pycache__/
 *.pyc

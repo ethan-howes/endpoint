@@ -1,0 +1,34 @@
+# Endpoint -- Python dependencies (ENDPOINT.md section 8)
+#
+# Pinned to a floor rather than an exact version: the demo must run on whatever
+# the venv has, and an exact pin that loses a wheel for a new Python is worse
+# than a slightly newer patch release.
+
+# --- service framework ---
+fastapi
+uvicorn[standard]
+httpx
+pydantic
+python-dotenv
+
+# --- geometry (S1, and S2's cover features) ---
+shapely
+pyproj
+polyline
+
+# --- S2: weather, cover, sun position, Solar API rasters ---
+pandas
+pvlib
+numpy
+rasterio
+
+# --- S3: vision ---
+anthropic
+
+# --- tests ---
+pytest
+
+# optional (S3 Option B, local segmentation model):
+# transformers
+# torch
+# pillow
