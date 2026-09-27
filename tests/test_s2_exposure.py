@@ -88,20 +88,8 @@ def campus():
     return path_map, cover_map, shade_map, spots
 
 
-def _dry_cost(monkeypatch, value: float) -> None:
-    """Pin ``exposure_dry_cost`` in every module that reads it."""
-    from services.s2_weather_cover import walk_network
-
-    cfg = replace(SETTINGS, exposure_dry_cost=value)
-    for mod in (walk_network, rain_exposure, service):
-        monkeypatch.setattr(mod, "SETTINGS", cfg)
-
-
 class TestExposureRanking:
-    def test_the_covered_exit_beats_the_nearer_open_kerb(self, campus, monkeypatch):
-        """With dry metres nearly free (0.1), the covered exit wins even though it
-        is 21 m longer. This was the default; see the next test for why it is not."""
-        _dry_cost(monkeypatch, 0.1)
+    def test_the_covered_exit_beats_the_nearer_open_kerb(self, campus):
         path_map, cover_map, shade_map, spots = campus
         net = rain_exposure.build_network(path_map, cover_map, shade_map)
         ranked = rain_exposure.rank_by_exposure(spots, ll(0, 0), net, FRAME)
@@ -115,17 +103,6 @@ class TestExposureRanking:
         assert best.wet_m == pytest.approx(14.0 - half, abs=1.5)
         b = next(r for r in ranked if r.spot.spot_id == "B")
         assert b.wet_m > best.wet_m
-
-    def test_at_the_default_a_long_covered_detour_loses_to_a_short_walk(self, campus):
-        """At exposure_dry_cost 0.5 a dry metre costs half a wet one, so 21 extra
-        metres to save 9 of rain is not worth it for a rider with a walker --
-        the setting that stopped routes walking past the car and back."""
-        path_map, cover_map, shade_map, spots = campus
-        net = rain_exposure.build_network(path_map, cover_map, shade_map)
-        ranked = rain_exposure.rank_by_exposure(spots, ll(0, 0), net, FRAME)
-        assert ranked[0].spot.spot_id == "B"
-        a = next(r for r in ranked if r.spot.spot_id == "A")
-        assert a.wet_m < ranked[0].wet_m  # A is still the drier walk
 
     def test_the_gap_model_gets_this_case_wrong(self, campus):
         """The regression the exposure model fixes, pinned so it stays fixed."""
@@ -188,10 +165,8 @@ class TestExposureRanking:
     def test_score_prefers_less_rain_and_stays_in_range(self):
         assert rain_exposure.score(0.0, 0.0) == pytest.approx(1.0)
         assert rain_exposure.score(10.0, 0.0) > rain_exposure.score(20.0, 0.0)
-        # Dry metres cost something, but less than wet ones: 20 dry metres are
-        # worth taking to avoid 20 wet ones; 100 are not (exposure_dry_cost 0.5).
-        assert rain_exposure.score(10.0, 20.0) > rain_exposure.score(30.0, 0.0)
-        assert rain_exposure.score(10.0, 100.0) < rain_exposure.score(30.0, 0.0)
+        # Dry metres cost something, but far less than wet ones.
+        assert rain_exposure.score(10.0, 100.0) > rain_exposure.score(30.0, 0.0)
         assert 0.0 < rain_exposure.score(500.0, 500.0) < 1.0
 
 
@@ -255,7 +230,6 @@ class TestServiceSelection:
 
     @pytest.mark.anyio
     async def test_exposure_is_the_default(self):
-        _dry_cost(self.monkeypatch, 0.1)  # so the exposure pick differs from the gap pick
         result = await service.rank(self._request())
         assert result.ranked[0].spot.spot_id == "A"
         assert result.ranked[0].wet_m is not None
@@ -359,11 +333,9 @@ class TestAccessiblePriority:
         )
 
     @pytest.mark.anyio
-    async def test_accessible_and_weather_choose_differently(self, monkeypatch):
+    async def test_accessible_and_weather_choose_differently(self):
         """In the campus fixture the covered exit (A) is the dry choice and the
-        nearer open kerb (B) the shorter walk. Dry metres are made cheap so the
-        weather ranking takes the cover; accessible must not."""
-        _dry_cost(monkeypatch, 0.1)
+        nearer open kerb (B) the shorter walk."""
         weather = await service.rank(self._req("weather"))
         access = await service.rank(self._req("accessible"))
         assert weather.ranked[0].spot.spot_id == "A"
