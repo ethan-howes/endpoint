@@ -103,8 +103,8 @@ judge flicker, judge the unsmoothed output before drawing conclusions.
 
 ## Throughput
 
-About 12-14 processed fps at 1280x720 with swin-large on this GPU, so a
-30 fps clip runs at roughly 0.4x real time. `--stride` cuts frames
+About 10-15 processed fps at 1280x720 with swin-large on this GPU, so a 30 fps
+clip runs at roughly 0.3-0.5x real time. `--stride` cuts frames
 proportionally. Prefer a smaller checkpoint or lower `--shortest-edge` over a
 large stride: stride above 2 makes the output visibly choppy, whereas input
 resolution degrades the mask smoothly.

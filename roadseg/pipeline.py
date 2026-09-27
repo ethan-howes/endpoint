@@ -185,8 +185,8 @@ def run(
     repo = resolve_model(cfg.model)
 
     if segmenter is None:
-        segmenter = RoadSegmenter.from_preset(
-            cfg.model,
+        segmenter = RoadSegmenter(
+            repo,
             road_classes=cfg.road_classes,
             device=cfg.device,
             amp=cfg.amp,
