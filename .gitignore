@@ -14,3 +14,9 @@ assets/samples/*.jpg
 *.pt
 *.pth
 *.safetensors
+
+# Secrets: local API keys. Deliberately slash-free so these match at any depth.
+# The results/ and assets/ patterns above are repo-root-anchored, which is why
+# they never match anything under src/ -- do not copy that mistake here.
+secrets.env
+.env
