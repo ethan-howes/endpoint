@@ -19,11 +19,12 @@ from __future__ import annotations
 
 from services.s1_legal_spots.overpass import build_point_query, build_road_query
 from services.s2_weather_cover.cover import build_cover_query, build_shade_query
+from services.s2_weather_cover.paths import build_paths_query
 
 #: service key -> ((kind, query builder), ...)
 QUERIES: dict[str, tuple] = {
     "s1": (("roads", build_road_query), ("points", build_point_query)),
-    "s2": (("cover", build_cover_query), ("shade", build_shade_query)),
+    "s2": (("cover", build_cover_query), ("shade", build_shade_query), ("paths", build_paths_query)),
 }
 
 #: Cache-id namespace per (service, kind) lives in ``shared.fixtures.cache_key``,

@@ -28,6 +28,7 @@ from shapely.geometry import LineString, Polygon
 
 from services.s2_weather_cover import (
     cover,
+    paths as paths_mod,
     rain_cover,
     scoring,
     service,
@@ -158,6 +159,13 @@ async def _no_shade(tile, radius, fallbacks, frame):
     return _shade_map([])
 
 
+async def _no_paths(tile, radius, fallbacks, frame):
+    # No walking network: rain mode falls back to the gap model, which is what
+    # the rain tests in this file exercise. The exposure model has its own
+    # hermetic tests in ``test_s2_exposure.py``.
+    return None
+
+
 def _no_network(*a, **k):
     raise AssertionError(
         "a test reached Overpass. Stub the seam it meant to stub, or the suite "
@@ -191,7 +199,9 @@ def _clean(monkeypatch):
     monkeypatch.setattr(weather, "get_hourly", _forecast())
     monkeypatch.setattr(service, "_fetch_covers", _no_covers)
     monkeypatch.setattr(service, "_fetch_shade", _no_shade)
+    monkeypatch.setattr(service, "_fetch_paths", _no_paths)
     monkeypatch.setattr(cover, "afetch_overpass", _no_network)
+    monkeypatch.setattr(paths_mod, "afetch_overpass", _no_network)
     yield
     service.clear_caches()
 

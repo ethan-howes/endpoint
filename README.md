@@ -174,6 +174,39 @@ in §6's definition-of-done check.
 
 ### S2 — weather and cover
 
+**Rain is ranked by metres walked in the rain, not by kerb-to-cover gap.** The gap
+model below measures only how far the car door is from the nearest cover. So it
+could not tell a rider who walks out of a building through a covered passage (dry
+until the last few metres) from one who crosses an open car park (wet the whole
+way). `rain_exposure.py` follows the walk instead:
+- **Dry geometry:** building footprints (indoors is dry, from the shade document)
+  plus cover features, with covered walkways and passages buffered to
+  `cover_path_half_width_m`.
+- **Walking network:** a new `paths` document (`way["highway"]` plus
+  `entrance` nodes, `paths.py`), split into wet and dry metres per edge.
+- **Search:** one shortest-path search from the rider, with edge cost
+  `wet + exposure_dry_cost × dry`, so routes seek cover.
+- **Score:** `1 / (1 + cost / exposure_score_scale_m)`, so still in (0, 1].
+- **Per spot:** `wet_m`, `dry_m`, the route as `walk_polyline`, the real
+  `walk_distance_m`, and a wait point (the last dry point before the kerb).
+
+`scripts/compare_rain_models.py` runs both models over ten campus riders. The
+exposure model never picks a wetter spot, and it fixes the bad cases: for example
+a rider at the Ryder Business Building goes from 87 m of rain to 32 m, and one at
+PG5 from 54 m of rain on a 307 m walk to 36 m on 58 m.
+
+`rain_ranking = "gap"` switches back to the gap model. The gap model is also the
+automatic fallback, with a `fallbacks_used` note, for a tile with no walking
+network. The `paths` fixtures are committed alongside cover and shade;
+re-capture with `python -m scripts.capture_fixtures --service s2 --kinds paths
+--bbox <DEMO_BBOX>`.
+
+**Sun mode fits the orchestrator's 6 s budget.** `shade_fraction` intersected a
+2 m probe disc with the union of every shadow in the area, at about 0.3 s a call,
+46 calls a request. That put a sun ranking at 16 s, so every sun ride timed out
+and fell back to walk distance. It now clips to the disc's bounding box first:
+1.4 s warm, same answers.
+
 **The doc's rain scoring is a no-op, and this is the one real fix.** `ENDPOINT.md`
 §6 line 512 weights a cover feature by confidence with `unverified: 0.3`, and
 line 517 separately awards `0.3 * walk_factor` to a spot with *no* cover. Those

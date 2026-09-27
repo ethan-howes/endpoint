@@ -27,7 +27,7 @@ from typing import Any
 
 from shared.config import SETTINGS
 from shared.fixtures import cache_key, fixtures_dir, read_fixture
-from shared.geo import LocalFrame, expanded_query_bbox, frame_for, tile_bbox, tile_cache_id
+from shared.geo import LocalFrame, _utm_epsg, expanded_query_bbox, frame_for, tile_bbox, tile_cache_id
 from shared.models import (
     Condition,
     ConditionsResult,
@@ -40,7 +40,7 @@ from shared.models import (
 )
 from shared.osm_cache import OverpassError, read_cache
 
-from . import rain_cover, scoring, sun_shade, weather
+from . import rain_cover, rain_exposure, scoring, sun_shade, weather
 from .cover import (
     Cover,
     CoverMap,
@@ -52,6 +52,7 @@ from .cover import (
     parse_covers,
     parse_shade,
 )
+from .paths import PathMap, PathWay, build_paths_query, fetch_paths, parse_paths
 
 log = logging.getLogger("endpoint.s2")
 
@@ -59,6 +60,12 @@ log = logging.getLogger("endpoint.s2")
 #: avoids the network, this avoids the disk.
 _COVER_MEMO: dict[str, CoverMap] = {}
 _SHADE_MEMO: dict[str, ShadeMap] = {}
+_PATHS_MEMO: dict[str, PathMap] = {}
+#: Built walking networks, keyed by the tiles they cover and the UTM zone. Building
+#: one means splitting every edge against the dry geometry, which is the expensive
+#: part of an exposure ranking; the tiles and their documents do not change between
+#: requests, so neither does the network.
+_NETWORK_MEMO: dict[tuple, rain_exposure.Network] = {}
 
 
 # --------------------------------------------------------------------------- #
@@ -252,6 +259,111 @@ async def _fetch_shade(
     return smap
 
 
+async def _fetch_paths(
+    tile: tuple[float, float, float, float],
+    radius: float,
+    fallbacks: list[str],
+    frame: LocalFrame,
+) -> PathMap | None:
+    """The walking network for one tile. Same fixture/cache/network order as covers."""
+    cache_id = tile_cache_id(
+        (tile[0] + tile[2]) / 2.0, (tile[1] + tile[3]) / 2.0, radius, "paths"
+    )
+    memo = _PATHS_MEMO.get(cache_id)
+    if memo is not None and memo.frame.lat == frame.lat and memo.frame.lng == frame.lng:
+        return memo
+
+    if SETTINGS.mock:
+        payload = read_fixture(fixtures_dir("s2_weather_cover"), cache_id)
+        if payload is None:
+            fallbacks.append(f"no committed paths fixture for tile {_tile_label(tile)}")
+            return None
+        pmap = parse_paths(tile, radius, payload, cache_id, frame)
+        _PATHS_MEMO[cache_id] = pmap
+        return pmap
+
+    query = build_paths_query(_expanded(tile, radius))
+    cached = read_cache(query, cache_key("s2", "paths", cache_id))
+    if cached is not None:
+        pmap = parse_paths(tile, radius, cached, cache_id, frame)
+        _PATHS_MEMO[cache_id] = pmap
+        return pmap
+
+    try:
+        pmap = await asyncio.wait_for(
+            fetch_paths(tile, radius, frame=frame), timeout=SETTINGS.cold_fetch_budget_s
+        )
+    except (asyncio.TimeoutError, TimeoutError):
+        fallbacks.append(
+            f"paths fetch timed out after {SETTINGS.cold_fetch_budget_s:g}s "
+            f"for tile {_tile_label(tile)}"
+        )
+        return None
+    except OverpassError:
+        fallbacks.append(f"Overpass unavailable for paths ({_tile_label(tile)})")
+        return None
+    except Exception as exc:  # noqa: BLE001
+        fallbacks.append(f"paths fetch error for tile {_tile_label(tile)}: {type(exc).__name__}")
+        return None
+
+    _PATHS_MEMO[cache_id] = pmap
+    return pmap
+
+
+async def _merge_paths(
+    tiles: list[tuple[float, float, float, float]],
+    radius: float,
+    fallbacks: list[str],
+    frame: LocalFrame,
+) -> PathMap | None:
+    """Every tile's walking network in one frame, ways and entrances deduped by id."""
+    ways: list[PathWay] = []
+    entrances: dict[int, tuple[float, float]] = {}
+    seen: set[int] = set()
+    got = False
+    for tile in tiles:
+        pmap = await _fetch_paths(tile, radius, fallbacks, frame)
+        if pmap is None:
+            continue
+        got = True
+        for w in pmap.ways:
+            if w.way_id not in seen:
+                seen.add(w.way_id)
+                ways.append(w)
+        entrances.update(pmap.entrances)
+    if not got:
+        return None
+    bbox = (min(t[0] for t in tiles), min(t[1] for t in tiles), max(t[2] for t in tiles), max(t[3] for t in tiles))
+    return PathMap(frame=frame, bbox=bbox, ways=ways, entrances=entrances, cache_id="merged")
+
+
+async def _rank_rain_by_exposure(
+    req: RankRequest,
+    tiles: list[tuple[float, float, float, float]],
+    radius: float,
+    fallbacks: list[str],
+    frame: LocalFrame,
+) -> tuple[list[RankedSpot], CoverMap | None] | None:
+    """The exposure ranking, or None when there is no walking network to rank on.
+
+    Buildings come from the shade document: indoors is dry, and the shade query is
+    already the one that fetches footprints. A missing shade tile only means
+    buildings are not counted as dry, so the ranking still runs on cover alone.
+    """
+    path_map = await _merge_paths(tiles, radius, fallbacks, frame)
+    if path_map is None or not path_map.ways:
+        fallbacks.append("no walking network; ranked rain by distance to cover")
+        return None
+    cover_map, shade_map = await _merge_maps(tiles, radius, fallbacks, frame, want_shade=True)
+
+    key = (tuple(sorted(tiles)), _utm_epsg(frame.lat, frame.lng))
+    net = _NETWORK_MEMO.get(key)
+    if net is None:
+        net = rain_exposure.build_network(path_map, cover_map, shade_map)
+        _NETWORK_MEMO[key] = net
+    return rain_exposure.rank_by_exposure(req.spots, req.rider_location, net, frame), cover_map
+
+
 def _expanded(
     tile: tuple[float, float, float, float], radius: float
 ) -> tuple[float, float, float, float]:
@@ -394,15 +506,22 @@ async def rank(req: RankRequest) -> ConditionsResult:
 
     try:
         if mode is Condition.RAIN:
-            cover_map, _ = await _merge_maps(
-                tiles, radius, fallbacks, frame, want_shade=False
-            )
-            if cover_map is None:
-                fallbacks.append("no rain cover data")
-                ranked = _by_walk(req.spots, "No cover data available nearby")
+            exposure = None
+            if SETTINGS.rain_ranking == "exposure" and req.spots:
+                exposure = await _rank_rain_by_exposure(req, tiles, radius, fallbacks, frame)
+            if exposure is not None:
+                ranked, cover_map = exposure
+                overlays = Overlays(cover_features=[c.as_model() for c in (cover_map.covers if cover_map else [])])
             else:
-                ranked = rain_cover.rank_spots(req.spots, cover_map)
-                overlays = Overlays(cover_features=[c.as_model() for c in cover_map.covers])
+                cover_map, _ = await _merge_maps(
+                    tiles, radius, fallbacks, frame, want_shade=False
+                )
+                if cover_map is None:
+                    fallbacks.append("no rain cover data")
+                    ranked = _by_walk(req.spots, "No cover data available nearby")
+                else:
+                    ranked = rain_cover.rank_spots(req.spots, cover_map)
+                    overlays = Overlays(cover_features=[c.as_model() for c in cover_map.covers])
 
         elif mode is Condition.SUN:
             sun = weather.sun_position(req.rider_location.lat, req.rider_location.lng, when)
@@ -454,7 +573,12 @@ async def rank(req: RankRequest) -> ConditionsResult:
     ).spot_id if req.spots else None
 
     needs_confirm = False
-    if ranked and ranked[0].cover_feature is not None and nearest_id:
+    if ranked and ranked[0].wet_m is not None:
+        # Exposure ranking: ranked walks are real route lengths, so compare the
+        # winner against the shortest real walk among them, not S1's estimate.
+        shortest = min(r.spot.walk_distance_m for r in ranked)
+        needs_confirm = scoring.needs_detour_confirmation(ranked[0].spot.walk_distance_m, shortest)
+    elif ranked and ranked[0].cover_feature is not None and nearest_id:
         nearest_walk = next(
             (s.walk_distance_m for s in req.spots if s.spot_id == nearest_id), 0.0
         )
@@ -567,6 +691,8 @@ def _shade_geojson(geom) -> dict | None:
 def clear_caches() -> None:
     _COVER_MEMO.clear()
     _SHADE_MEMO.clear()
+    _PATHS_MEMO.clear()
+    _NETWORK_MEMO.clear()
     weather.clear_cache()
 
 
