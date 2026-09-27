@@ -93,7 +93,7 @@ def _reason(wet: float, walk: float, gap: float | None, cover: Cover | None) -> 
         # The wait point is the last dry place before the kerb: the rider waits
         # there, and only walks the remaining gap once the car has arrived.
         where = f"under the {cover.kind.replace('_', ' ')}" if cover else "indoors"
-        text += f"; wait {where} until the car arrives, then {gap:.0f} m to the car"
+        text += f"; wait {where} until the car arrives, then {gap:.0f} m uncovered to the car"
     return text
 
 

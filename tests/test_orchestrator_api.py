@@ -883,3 +883,33 @@ class TestAccessMessages:
     def test_riders_who_did_not_ask_get_the_plain_message(self, client, stub):
         msg = self._plan(client, stub, {}, [], mobility=False)["rider_message"]
         assert "curb" not in msg.lower()
+
+
+class TestRainWaitWording:
+    """Decision A, option (c): the ranking keeps choosing the driest walk, and
+    the message says how much of it is left uncovered after the wait."""
+
+    def _msg(self, client, stub, gap, cover=True):
+        cf = CoverFeature(feature_id="c", kind="building_passage",
+                          geometry_wkt="LINESTRING(0 0, 1 1)", provides=["rain"], source="osm")
+        best = _ranked(stub.spots[1], 0.9, "passage", cover=cf if cover else None)
+        best = best.model_copy(update={"gap_m": gap})
+        stub.conditions = ConditionsResult(weather=_weather(), mode=Condition.RAIN, ranked=[best])
+        rid = _request(client)
+        return client.post(f"/rides/{rid}/answer", json={"mobility_needs": True}).json()["rider_message"]
+
+    def test_a_long_last_stretch_is_stated(self, client, stub):
+        msg = self._msg(client, stub, 65.0)
+        assert "wait under cover" in msg
+        assert "65 m uncovered to the car" in msg
+
+    def test_cover_at_the_car_says_so(self, client, stub):
+        assert "right beside it" in self._msg(client, stub, 1.0)
+
+    def test_the_last_dry_place_can_be_indoors(self, client, stub):
+        msg = self._msg(client, stub, 20.0, cover=False)
+        assert "wait indoors" in msg and "20 m uncovered" in msg
+
+    def test_no_wait_point_does_not_claim_cover(self, client, stub):
+        msg = self._msg(client, stub, None, cover=False)
+        assert "cover" not in msg.split(".")[0]

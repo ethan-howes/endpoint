@@ -21,6 +21,7 @@ message says the spot is the rider's own location, because that is what it is.
 
 from __future__ import annotations
 
+from shared.config import SETTINGS
 from shared.models import Condition, Confidence, CurbAccess, RankedSpot, RidePhase, WeatherReport
 
 from .ride import Ride
@@ -87,10 +88,7 @@ def build(ride: Ride) -> str:
 
     # --- the section 7 table ---
     if condition == Condition.RAIN:
-        where = "under cover" if spot.cover_feature else _where(spot)
-        lead = (
-            f"It's raining when your car arrives, so wait {where}, {_walk(spot)}."
-        )
+        lead = f"It's raining when your car arrives, {_rain_wait(spot)}"
     elif condition == Condition.SUN:
         where = "in the shade" if spot.cover_feature else _where(spot)
         lead = f"It's sunny when your car arrives, so wait {where}, {_walk(spot)}."
@@ -104,6 +102,28 @@ def build(ride: Ride) -> str:
         lead += f" {_sentence(ride.vision_reason)}"
 
     return lead + _hedge(spot)
+
+
+def _rain_wait(spot: RankedSpot) -> str:
+    """Where to wait in the rain, and how much open ground is left after that.
+
+    ``gap_m`` is the distance from the wait point to the car -- the stretch the
+    rider walks uncovered once the car has arrived. The ranking does not cap it
+    (a long covered walk with a long last stretch can still be the driest
+    option), so the message states it rather than implying the rider is covered
+    all the way. Indoors is a wait point too: the exposure ranking sets
+    ``gap_m`` with no cover feature when the last dry place is a building.
+    """
+    gap = spot.gap_m
+    if gap is None:
+        return f"and your pickup is {_walk(spot)} {_where(spot)}."
+    where = "under cover" if spot.cover_feature else "indoors"
+    if gap <= SETTINGS.cover_gap_free_m:
+        return f"so wait {where} {_walk(spot)}; the car stops right beside it."
+    return (
+        f"so wait {where} {_walk(spot)}, then it's {gap:.0f} m uncovered to the car "
+        f"once it arrives."
+    )
 
 
 def _access(spot: RankedSpot) -> str:
