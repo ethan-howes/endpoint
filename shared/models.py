@@ -363,6 +363,17 @@ class RankedSpot(BaseModel):
     confidence: Confidence = Confidence.UNVERIFIED
     reason: str = ""
 
+    # --- additions for the rain exposure ranking, all optional ---
+    #: Metres of the rider's walk that are out in the rain, and under cover or
+    #: indoors. Set when S2 ranked by exposure; None for the gap model and in
+    #: sun/neutral mode.
+    wet_m: float | None = None
+    dry_m: float | None = None
+    #: The walking route from the rider to the stop point, as an encoded polyline
+    #: (precision 5, lat/lng). The route the exposure was measured along, so a UI
+    #: can draw exactly the path the rider was scored on.
+    walk_polyline: str | None = None
+
 
 class SunPosition(BaseModel):
     elevation_deg: float

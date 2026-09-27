@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import math
 
+import shapely
 from shapely.affinity import translate
 from shapely.geometry import Point, Polygon
 from shapely.ops import nearest_points, unary_union
@@ -162,7 +163,14 @@ def shade_fraction(geom: object, point: Point, radius_m: float) -> float:
     """
     disc = point.buffer(radius_m)
     try:
-        frac = float(geom.intersection(disc).area / disc.area)
+        # Clip to the disc's box first. ``geom`` is the union of every shadow in
+        # the area, and a full overlay of it against a 2 m disc cost ~0.3 s per
+        # call -- 46 calls a request put the sun ranking at 16 s, far past the
+        # orchestrator's 6 s S2 timeout, so every sun ride fell back to walk
+        # distance. ``clip_by_rect`` is one linear pass; the exact intersection
+        # then runs on a few square metres. The area is identical.
+        local = shapely.clip_by_rect(geom, *disc.bounds)
+        frac = float(local.intersection(disc).area / disc.area)
     except Exception:  # noqa: BLE001
         return 0.0
     # Clamped, not just bounded by the arithmetic. `intersection.area` of a

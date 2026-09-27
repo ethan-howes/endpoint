@@ -55,6 +55,7 @@ CACHE_NAMESPACES: dict[tuple[str, str], str] = {
     ("s1", "points"): "",
     ("s2", "cover"): "s2_cover/",
     ("s2", "shade"): "s2_shade/",
+    ("s2", "paths"): "s2_paths/",
 }
 
 

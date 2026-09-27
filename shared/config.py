@@ -199,6 +199,37 @@ class Settings:
     #: claiming it mattered.
     rain_max_gap_m: float = 15.0
 
+    #: Which rain ranking to use. ``"exposure"`` ranks by metres walked in the rain
+    #: along the rider's actual walking route (``rain_exposure.py``): a rider inside
+    #: a building whose covered passage runs to the kerb gets there nearly dry, even
+    #: though the passage is 11 m from the car door. The gap model scored that same
+    #: spot as uncovered, because it only ever measured kerb-to-cover distance and
+    #: never the walk. ``"gap"`` is that original model, kept as the fallback for a
+    #: tile with no walking network, and as a switch for comparing the two.
+    rain_ranking: str = "exposure"
+
+    #: Route cost of a dry metre relative to a wet one. Not zero: a long detour
+    #: indoors is still a long walk for a rider with a cane, so 10 dry metres cost
+    #: as much as 1 wet one. Used both to choose the route and to score it.
+    exposure_dry_cost: float = 0.1
+
+    #: ``score = 1 / (1 + cost / scale)`` with ``cost = wet + dry_cost * dry``.
+    #: At 50 m of rain the score is halved; a dry spot at the kerb scores ~1. Keeps
+    #: the score in (0, 1] so the orchestrator's fusion and hysteresis are unchanged.
+    exposure_score_scale_m: float = 50.0
+
+    #: Half-width of a covered walkway or building passage centreline when deciding
+    #: whether a stretch of path is under it. OSM draws these as lines; a covered
+    #: walkway is typically 3-4 m wide.
+    cover_path_half_width_m: float = 2.0
+
+    #: Straight "connectors" join the rider and each kerb to the walking network:
+    #: up to ``path_connect_k`` network nodes within ``path_connect_radius_m``. A
+    #: connector that crosses a building interior counts as dry, which is how a
+    #: rider standing inside a building reaches its exits.
+    path_connect_radius_m: float = 60.0
+    path_connect_k: int = 6
+
     #: Unchanged from the doc, and for the same reason as ``rain_max_gap_m`` it is
     #: the number that actually matches the data: sun shade is a continuous thing
     #: (a kerb is lit or it is not) rather than a doorway, so 15 m was never at
@@ -307,6 +338,22 @@ out body geom;
 (
   nwr["building"]({bbox});
   node["natural"="tree"]({bbox});
+);
+out body geom;
+"""
+
+    #: Everything a pedestrian can walk on, plus building entrances, for the rain
+    #: exposure ranking's walking network. ``way["highway"]`` rather than a list of
+    #: footway types because campus walking routes run along service roads and
+    #: car parks as often as along footways, and a network with those removed is
+    #: disconnected in exactly the places a rider has to cross. Unwalkable classes
+    #: (motorways, construction) are dropped at parse time in ``paths.py``, where the
+    #: rule can be tested, rather than in query text where it cannot.
+    paths_query: str = """
+[out:json][timeout:60];
+(
+  way["highway"]({bbox});
+  node["entrance"]({bbox});
 );
 out body geom;
 """
