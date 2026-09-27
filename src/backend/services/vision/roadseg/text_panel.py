@@ -311,11 +311,17 @@ def render_panel(
 
     shown = max(0, min(int(revealed), len(events)))
     rendered: list[list[str]] = []
+    counter_height = style.body_size + style.line_gap
 
     # Measure from the newest backwards, so that if the panel overflows it drops
     # the OLDEST lines rather than the newest. A log that forgets your oldest
     # entry is correct; one that hides the newest is worse than useless.
-    budget = height - y - style.margin
+    #
+    # The counter's row is subtracted from the budget. Without that, a full
+    # panel runs its last line down into the counter's band and the two overlap:
+    # the counter is right-aligned at height - margin - body_size, and the body
+    # wraps to inner - label_size, so both claim the same pixels.
+    budget = height - y - style.margin - counter_height
     for index in range(shown - 1, -1, -1):
         event = events[index]
         body_lines = wrap(draw, str(event.get("text", "")), body_font,
@@ -366,7 +372,14 @@ def render_panel(
         y += style.block_gap
 
     if len(events) > 0:
-        counter = f"{shown} of {len(events)}"
+        # Report the range actually on screen, not the number revealed. A panel
+        # showing the last 6 of 17 revealed events must not claim "17 of 17",
+        # or the viewer counts lines that were never drawn and concludes the
+        # panel dropped the newest, which is the opposite of what happened.
+        if first > 0:
+            counter = f"{first + 1}-{shown} of {len(events)}"
+        else:
+            counter = f"{shown} of {len(events)}"
         draw.text(
             (width - style.margin - text_width(draw, counter, body_font),
              height - style.margin - style.body_size),

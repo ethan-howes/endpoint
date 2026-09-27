@@ -43,6 +43,10 @@ DEFAULT_MODEL = "gemini-3.8-flash"
 DEFAULT_OUT_DIR = os.path.join("results", "gemini")
 POLL_INTERVAL_SECONDS = 5.0
 POLL_TIMEOUT_SECONDS = 900.0
+WINDOW_ATTEMPTS = 4
+WINDOW_BACKOFF_SECONDS = 20.0
+RETRIABLE_STATUS = (408, 429, 500, 502, 503, 504)
+"""Statuses worth retrying, mirroring google.genai._api_client._RETRY_HTTP_STATUS_CODES."""
 
 MIME_BY_SUFFIX = {
     ".mov": "video/quicktime",
@@ -250,6 +254,29 @@ def upload_video(client, path: str, mime_type: str, *, verbose: bool = True):
     return uploaded
 
 
+def format_offset(seconds: float) -> str:
+    """Render a window boundary as a protobuf Duration string.
+
+    A bare f-string is not enough here. windows_for() divides the clip length by
+    the window count, so the boundaries inherit binary-float dust -- 36.15 / 6
+    is 6.0249999999999995 -- and str() of that is 16 fractional digits. A
+    protobuf Duration accepts at most 9, and rejects the rest with "Invalid
+    duration format, failed to parse nano seconds", which surfaces as a 400
+    naming the offset field rather than anything to do with the video.
+
+    Millisecond precision is well inside what the format allows and well below
+    anything that matters: a frame of 59.9 fps footage is 16.7 ms, so rounding
+    to 1 ms cannot drop or add a frame.
+
+    Args:
+        seconds: offset in seconds.
+
+    Returns:
+        e.g. 6.0249999999999995 -> "6.025s".
+    """
+    return f"{seconds:.3f}s"
+
+
 def video_part(uploaded, *, start: float | None = None, end: float | None = None):
     """Build a Part referencing the uploaded video, optionally windowed.
 
@@ -273,8 +300,8 @@ def video_part(uploaded, *, start: float | None = None, end: float | None = None
     )
     if start is not None or end is not None:
         part.video_metadata = types.VideoMetadata(
-            start_offset=f"{0.0 if start is None else start}s",
-            end_offset=f"{end}s",
+            start_offset=format_offset(0.0 if start is None else start),
+            end_offset=format_offset(end),
         )
     return part
 
@@ -349,6 +376,69 @@ def ask(
     return thought, answer, getattr(response, "usage_metadata", None)
 
 
+def ask_with_retry(
+    client,
+    uploaded,
+    model: str,
+    prompt: str,
+    *,
+    start: float | None = None,
+    end: float | None = None,
+    attempts: int = WINDOW_ATTEMPTS,
+) -> tuple[str, str, object]:
+    """Run one window's ask(), retrying transient server-side failures.
+
+    The SDK already retries 5 times, but only across roughly 15 s of backoff,
+    which is not enough to ride out a sustained demand spike. A 6-window run
+    makes 6 video calls back to back, so it has 6 chances to meet one, and a
+    single failure discards the whole run including a 98 MB upload. Retrying
+    per window, with the wait growing each time, keeps the expensive part
+    instead of starting over.
+
+    Only the statuses in RETRIABLE_STATUS are retried. A 400 or 401 will fail
+    identically on every attempt, so it propagates immediately rather than
+    burning the backoff.
+
+    Args:
+        client: an initialised google.genai Client.
+        uploaded: the ACTIVE File from upload_video().
+        model: model id.
+        prompt: the user-turn text.
+        start: window start in seconds, or None for the whole clip.
+        end: window end in seconds, or None for the whole clip.
+        attempts: total attempts including the first, at least 1.
+
+    Returns:
+        (thought_summary, answer_text, usage_metadata), as ask() does.
+
+    Raises:
+        ValueError: when attempts is below 1.
+        google.genai.errors.APIError: on a non-retriable status, or once the
+            attempts are exhausted.
+    """
+    if attempts < 1:
+        raise ValueError(f"attempts must be at least 1, got {attempts}")
+
+    from google.genai import errors as genai_errors
+
+    delay = WINDOW_BACKOFF_SECONDS
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return ask(client, uploaded, model, prompt, start=start, end=end)
+        except genai_errors.APIError as exc:
+            status = getattr(exc, "code", None)
+            if status not in RETRIABLE_STATUS or attempt >= attempts:
+                raise
+            print(
+                f"  HTTP {status} on attempt {attempt}/{attempts}, "
+                f"retrying in {delay:.0f}s"
+            )
+            time.sleep(delay)
+            delay *= 2
+
+
 def windows_for(duration: float, count: int) -> list[tuple[float, float]]:
     """Split a clip into `count` contiguous time windows.
 
@@ -381,6 +471,9 @@ def collect(
 ) -> tuple[str, str, object]:
     """Run either one whole-clip call or one call per window, and merge.
 
+    Each window goes through ask_with_retry(), so a transient 429 or 503 costs a
+    pause rather than the run.
+
     Args:
         client: an initialised google.genai Client.
         uploaded: the ACTIVE File from upload_video().
@@ -411,7 +504,7 @@ def collect(
                 f"notable happens in this segment, reply with a single line: "
                 f"[{format_timestamp(start)}] NOTE - nothing notable here."
             )
-        thought, answer, usage = ask(
+        thought, answer, usage = ask_with_retry(
             client, uploaded, model, prompt, start=start, end=end
         )
         if thought:
