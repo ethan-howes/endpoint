@@ -24,11 +24,13 @@ doors.
 end, and unpaved surfaces add a penalty in metres to the route cost, so routes
 avoid them and the spots whose best route still has one rank lower.
 
-**Points snap onto the nearest path, not onto distant nodes.** The rider and each
-stop join the graph at their projection onto the nearest walkable segments, split
-there. The earlier graph joined them by straight links to any node within 60 m,
-and those links jumped flights of steps and cut across roads without a crossing,
-so none of the costs above could apply. A snap may not cross a building wall.
+**How a point joins the graph.** The rider and each stop snap onto the nearest
+walkable segments, split there, and may also walk straight to a node within
+``open_ground_radius_m`` across a lawn or car park. The earlier graph joined them
+by straight links to any node within 60 m, and those links jumped flights of
+steps and cut across roads for free, so none of the costs above could apply. Now
+no link may cross a wall, a flight of steps or a mapped crossing, and a link that
+crosses a road pays the unknown-crossing penalty.
 
 Pure: no I/O. Everything tunable is in ``shared/config.py``.
 """
@@ -43,6 +45,7 @@ from typing import Literal, NamedTuple
 
 import numpy as np
 import shapely
+import shapely.ops
 from shapely.geometry import LineString, Point
 from shapely.strtree import STRtree
 
@@ -70,6 +73,12 @@ _WALL_TOLERANCE_M = 0.5
 _MAX_DOORS = 12
 #: How far an isolated door (an entrance on no walkable way) reaches outward.
 _DOOR_STUB_RADIUS_M = 30.0
+#: Roads a pedestrian must cross, not walk along: a link across one pays the
+#: unknown-crossing penalty.
+_VEHICLE_ROADS = frozenset({
+    "primary", "primary_link", "secondary", "secondary_link", "tertiary",
+    "tertiary_link", "residential", "unclassified", "service", "living_street",
+})
 #: A point snaps to the nearest segment and to any others at most this much
 #: farther away. Wider, and a rider on one sidewalk snaps to the one across the
 #: road, which is a road crossing with no crossing in it.
@@ -143,6 +152,10 @@ class Network:
     walls: object = None
     buildings: dict[str, Building] = field(default_factory=dict)
     segs: list[_Seg] = field(default_factory=list)
+    #: Prepared unions: steps and mapped crossings (a link may not cross them),
+    #: and vehicle roads (a link across one pays for it).
+    barriers: object = None
+    roads: object = None
     _seg_tree: STRtree | None = None
     _tree: STRtree | None = None
     _tree_ids: list[str] = field(default_factory=list)
@@ -361,13 +374,24 @@ def build_network(path_map: PathMap, cover_map: CoverMap | None, shade_map: Shad
                 if through <= _WALL_TOLERANCE_M:
                     _add_edge(adj, segments, d, n, pd, points[n], 0.0)
 
+    def _lines(pred):
+        lines = [LineString(w.points) for w in path_map.ways if pred(w) and len(w.points) >= 2]
+        if not lines:
+            return None
+        u = shapely.union_all(lines)
+        shapely.prepare(u)
+        return u
+
+    barriers = _lines(lambda w: w.highway == "steps" or w.footway == "crossing")
+    roads = _lines(lambda w: w.highway in _VEHICLE_ROADS)
+
     ids = np.array(list(points.keys()), dtype=np.int64)
     xy = np.array([points[i] for i in ids], dtype=float).reshape(-1, 2)
     net = Network(
         ids=ids, xy=xy, index={int(i): k for k, i in enumerate(ids)}, adj=adj, dry=dry,
         entrances={i for i in path_map.entrances if i in points},
         covers=list(cover_map.covers) if cover_map else [],
-        walls=walls, buildings=buildings, segs=segments,
+        walls=walls, buildings=buildings, segs=segments, barriers=barriers, roads=roads,
     )
     if segments:
         net._seg_tree = STRtree([LineString([s.pa, s.pb]) for s in segments])
@@ -426,6 +450,42 @@ def _snap_links(net: Network, at: XY, *, allow_walls: bool) -> list[Link]:
     return links
 
 
+def _nearest_nodes(net: Network, at: XY, k: int, radius: float) -> list[int]:
+    if len(net.ids) == 0:
+        return []
+    d = np.hypot(net.xy[:, 0] - at[0], net.xy[:, 1] - at[1])
+    order = np.argsort(d)[:k]
+    return [int(net.ids[i]) for i in order if d[i] <= radius]
+
+
+def _open_links(net: Network, at: XY) -> list[Link]:
+    """Straight walks across open ground to nearby nodes.
+
+    The line is trimmed half a metre at each end before testing, so a link that
+    merely *ends* on a crossing or a road is not taken to cross it.
+    """
+    out = []
+    for n in _nearest_nodes(net, at, SETTINGS.path_connect_k, SETTINGS.open_ground_radius_m):
+        b = tuple(net.xy[net.index[n]])
+        length = math.hypot(b[0] - at[0], b[1] - at[1])
+        if length < 1e-6:
+            out.append(Link(n, 0.0, 0.0))
+            continue
+        line = LineString([at, b])
+        if net.walls is not None and line.intersection(net.walls).length > _WALL_TOLERANCE_M:
+            continue
+        inner = shapely.ops.substring(line, 0.5, length - 0.5) if length > 1.0 else None
+        if inner is not None and net.barriers is not None and net.barriers.intersects(inner):
+            continue
+        penalty, flag, way = 0.0, None, None
+        if inner is not None and net.roads is not None and net.roads.intersects(inner):
+            # A synthetic way id per link, so each open road crossing counts once.
+            penalty, flag, way = SETTINGS.unknown_crossing_penalty_m, "unknown_crossing", -1_000_000 - n
+        dry = min(float(_overlap_lengths([(at, b)], net.dry)[0]), length)
+        out.append(Link(n, length, dry, penalty, flag, way))
+    return out
+
+
 def _links(net: Network, at: XY, *, rider: bool) -> tuple[list[Link], str | None]:
     """How a point joins the graph, and a note when it had to bend the rules.
 
@@ -445,7 +505,7 @@ def _links(net: Network, at: XY, *, rider: bool) -> tuple[list[Link], str | None
                 out.append(Link(dnode, length, length))  # indoors: dry
             return out, None
 
-    links = _snap_links(net, at, allow_walls=False)
+    links = _snap_links(net, at, allow_walls=False) + _open_links(net, at)
     if links:
         return links, None
     links = _snap_links(net, at, allow_walls=True)

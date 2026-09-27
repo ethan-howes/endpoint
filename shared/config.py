@@ -237,6 +237,15 @@ class Settings:
     #: mapped entrance at all).
     door_snap_m: float = 2.0
 
+    #: Besides snapping onto the nearest path, a point may walk straight to a
+    #: network node this close across open ground -- a lawn, a car park -- as
+    #: long as the line crosses no wall, no flight of steps and no mapped
+    #: crossing, and pays the unknown-crossing penalty for any road it crosses.
+    #: Without it, a kerb 42 m from the rider across grass with no mapped path
+    #: routed 308 m round. Shorter than ``path_connect_radius_m`` because FIU
+    #: has lakes and fences no map layer here knows about.
+    open_ground_radius_m: float = 40.0
+
     #: Door-to-door through a building is the straight line times this: corridors
     #: do not run wall to wall. The same 1.3 S1 uses for streets.
     indoor_detour_factor: float = 1.3

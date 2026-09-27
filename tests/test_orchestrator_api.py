@@ -840,3 +840,40 @@ class TestSimulator:
 
 async def _noop():
     return None
+
+
+# --------------------------------------------------------------------------- #
+# accessibility in the rider message
+# --------------------------------------------------------------------------- #
+
+class TestAccessMessages:
+    def _plan(self, client, stub, spot_update: dict, notes: list[str], mobility=True):
+        from shared.models import CurbAccess  # noqa: F401  (values used via spot_update)
+
+        best = _ranked(stub.spots[1].model_copy(update=spot_update), 0.9, "awning over the kerb")
+        best = best.model_copy(update={"route_notes": notes})
+        stub.conditions = ConditionsResult(weather=_weather(), mode=Condition.RAIN, ranked=[best])
+        rid = _request(client)
+        return client.post(f"/rides/{rid}/answer", json={"mobility_needs": mobility}).json()
+
+    def test_a_known_ramp_and_a_building_route_are_explained(self, client, stub):
+        from shared.models import CurbAccess
+
+        msg = self._plan(client, stub,
+                         {"curb_access": CurbAccess.LOWERED, "ramp_distance_m": 8.0},
+                         ["through Ernest R. Graham Center"])["rider_message"]
+        assert "curb ramp 8 m from the car" in msg
+        assert "through Ernest R. Graham Center while it's open" in msg
+
+    def test_an_unmapped_kerb_is_unconfirmed_not_absent(self, client, stub):
+        msg = self._plan(client, stub, {}, [])["rider_message"]
+        assert "couldn't confirm a curb ramp" in msg
+        assert "no curb ramp" not in msg.lower()
+
+    def test_steps_are_mentioned(self, client, stub):
+        msg = self._plan(client, stub, {}, ["route includes steps"])["rider_message"]
+        assert "includes steps" in msg
+
+    def test_riders_who_did_not_ask_get_the_plain_message(self, client, stub):
+        msg = self._plan(client, stub, {}, [], mobility=False)["rider_message"]
+        assert "curb" not in msg.lower()

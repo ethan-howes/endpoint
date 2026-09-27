@@ -21,7 +21,7 @@ message says the spot is the rider's own location, because that is what it is.
 
 from __future__ import annotations
 
-from shared.models import Condition, Confidence, RankedSpot, RidePhase, WeatherReport
+from shared.models import Condition, Confidence, CurbAccess, RankedSpot, RidePhase, WeatherReport
 
 from .ride import Ride
 
@@ -78,7 +78,7 @@ def build(ride: Ride) -> str:
     if phase == RidePhase.CONFIRMED and ride.final_spot is not None and ride.vision_switched:
         return (
             f"We moved your pickup to the spot {_where(spot)}, {_walk(spot)}. "
-            f"{_sentence(ride.vision_reason)}"
+            f"{_sentence(ride.vision_reason)}{_access(spot)}"
         ).rstrip()
 
     # --- no mobility needs: the product is just a pickup, so say that ---
@@ -96,6 +96,7 @@ def build(ride: Ride) -> str:
         lead = f"It's sunny when your car arrives, so wait {where}, {_walk(spot)}."
     else:
         lead = f"Your car will pick you up {_walk(spot)} {_where(spot)}."
+    lead += _access(spot)
 
     if phase == RidePhase.PREDICTED:
         lead += f" {_preview(ride)}"
@@ -103,6 +104,40 @@ def build(ride: Ride) -> str:
         lead += f" {_sentence(ride.vision_reason)}"
 
     return lead + _hedge(spot)
+
+
+def _access(spot: RankedSpot) -> str:
+    """What a rider with a walker or a cane meets on the way and at the car door.
+
+    Only for riders who asked for comfort, and only what the data supports. A
+    building is named only because the route uses it, and S2 only routes through
+    buildings it believes are open at pickup time, so "while it's open" is true
+    whichever hours applied. An unmapped kerb is said to be unconfirmed, never
+    absent: around FIU mappers recorded ramps, not the kerbs without one.
+    """
+    parts: list[str] = []
+    through = [n[len("through "):] for n in spot.route_notes if n.startswith("through ")]
+    if through:
+        parts.append(f"Your route goes through {' and '.join(through)} while it's open.")
+    if "route includes steps" in spot.route_notes:
+        parts.append("The walk includes steps.")
+    if "crosses a road at a raised curb" in spot.route_notes:
+        parts.append("One crossing on the way has a raised curb.")
+
+    access = spot.spot.curb_access
+    ramp = spot.spot.ramp_distance_m
+    if access == CurbAccess.FLUSH:
+        parts.append("The curb at the car is level with the road.")
+    elif access == CurbAccess.LOWERED:
+        if ramp is not None and ramp >= 3:
+            parts.append(f"There's a curb ramp {ramp:.0f} m from the car.")
+        else:
+            parts.append("There's a curb ramp right by the car.")
+    elif access == CurbAccess.RAISED:
+        parts.append("There's a raised curb at the car.")
+    else:
+        parts.append("We couldn't confirm a curb ramp at this spot.")
+    return " " + " ".join(parts)
 
 
 def _sentence(text: str) -> str:
