@@ -9,3 +9,7 @@ scipy                     # required by transformers' Mask2FormerLoss at model i
 torch
 torchvision
 transformers
+
+# Demo only, not needed for segmentation.
+google-genai             # scripts/ask_gemini.py: Files API upload + generate_content
+pillow                   # roadseg/text_panel.py: word-wrapped text rendering
