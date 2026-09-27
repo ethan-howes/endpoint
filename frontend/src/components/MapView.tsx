@@ -230,7 +230,7 @@ export function MapView({ ride, insetRight }: { ride: Ride; insetRight: number }
         {beforePickup && coverFeatures.flatMap((f) =>
           wktShapes(f.geometry_wkt, rider).map((shape, i) => {
             const k = `${f.feature_id}_${i}`
-            const tip = <Tooltip>{f.kind.replace(/_/g, ' ')} · {f.confidence}</Tooltip>
+            const tip = <Tooltip>{f.kind.replace(/_/g, ' ')}{f.confidence !== 'unverified' ? ` · ${f.confidence}` : ''}</Tooltip>
             if (shape.kind === 'polygon') return <Polygon key={k} positions={shape.points} pathOptions={COVER_STYLE}>{tip}</Polygon>
             if (shape.kind === 'line') return <Polyline key={k} positions={shape.points} pathOptions={{ color: '#0fb9a0', weight: 7, opacity: 0.75, lineCap: 'round' }}>{tip}</Polyline>
             return <CircleMarker key={k} center={shape.points[0]} radius={7} pathOptions={COVER_STYLE}>{tip}</CircleMarker>

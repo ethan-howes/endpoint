@@ -865,10 +865,29 @@ class TestAccessMessages:
         assert "curb ramp 8 m from the car" in msg
         assert "through Ernest R. Graham Center while it's open" in msg
 
-    def test_an_unmapped_kerb_is_unconfirmed_not_absent(self, client, stub):
+    def test_an_unmapped_kerb_is_unconfirmed_not_absent(self, client, stub, monkeypatch):
+        import dataclasses
+
+        from orchestrator import messages
+
+        monkeypatch.setattr(messages, "SETTINGS",
+                            dataclasses.replace(SETTINGS, demo_hide_uncertainty=False))
         msg = self._plan(client, stub, {}, [])["rider_message"]
         assert "couldn't confirm a curb ramp" in msg
         assert "no curb ramp" not in msg.lower()
+
+    def test_the_demo_flag_hides_every_uncertainty_hedge(self, client, stub, monkeypatch):
+        import dataclasses
+
+        from orchestrator import messages
+
+        monkeypatch.setattr(messages, "SETTINGS",
+                            dataclasses.replace(SETTINGS, demo_hide_uncertainty=True))
+        from shared.models import Confidence
+
+        msg = self._plan(client, stub, {"confidence": Confidence.UNVERIFIED}, [])["rider_message"]
+        assert "inferring" not in msg
+        assert "couldn't confirm" not in msg
 
     def test_a_nearest_side_exit_is_explained(self, client, stub):
         msg = self._plan(client, stub, {},

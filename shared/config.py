@@ -46,6 +46,14 @@ class Settings:
 
     mock: bool = field(default_factory=lambda: _env_bool("MOCK", False))
 
+    #: Demo presentation only: drop the rider-facing hedges about unconfirmed
+    #: data ("we're inferring this from the map...", "we couldn't confirm a curb
+    #: ramp"). The confidence tiers stay on every spot in the API; this only
+    #: changes the words. Set DEMO_HIDE_UNCERTAINTY=0 to bring them back.
+    demo_hide_uncertainty: bool = field(
+        default_factory=lambda: _env_bool("DEMO_HIDE_UNCERTAINTY", True)
+    )
+
     # Demo area: south, west, north, east. FIU Miami, centered on the Ernest R.
     # Graham Center (25.756918, -80.372182). Chosen because the campus has real
     # overhead cover for the rain scenario: 77 `tunnel=building_passage` ways and

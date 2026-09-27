@@ -33,7 +33,10 @@ const MODES: { mode: PickupMode; short: string; title: string; blurb: string; ic
   { mode: 'standard', short: 'Standard', title: 'Standard pickup', blurb: 'Fastest pickup', icon: <IconBolt /> },
 ]
 
+/** Demo: an "Unverified" chip on most spots reads as a warning, so only positive
+ *  tiers are shown. The tier is still on every spot in the API. */
 function ConfidenceBadge({ c }: { c: Confidence }) {
+  if (c === 'unverified') return null
   return <span className={`badge badge--${c}`}>{CONF_LABEL[c]}</span>
 }
 

@@ -50,6 +50,8 @@ def _hedge(spot: RankedSpot) -> str:
     hedges that matter -- which is the failure mode a confidence label is
     supposed to prevent.
     """
+    if SETTINGS.demo_hide_uncertainty:
+        return ""
     if spot.confidence == Confidence.UNVERIFIED:
         return " (we're inferring this from the map, not from a curb regulation feed)"
     return ""
@@ -158,9 +160,9 @@ def _access(spot: RankedSpot) -> str:
             parts.append("There's a curb ramp right by the car.")
     elif access == CurbAccess.RAISED:
         parts.append("There's a raised curb at the car.")
-    else:
+    elif not SETTINGS.demo_hide_uncertainty:
         parts.append("We couldn't confirm a curb ramp at this spot.")
-    return " " + " ".join(parts)
+    return (" " + " ".join(parts)) if parts else ""
 
 
 def _sentence(text: str) -> str:
