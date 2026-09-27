@@ -26,6 +26,7 @@ import asyncio
 import contextlib
 import logging
 from contextlib import asynccontextmanager
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -75,6 +76,10 @@ class AnswerRequest(StrictModel):
     mobility_needs: bool
     force_condition: Condition | None = None
     force_time: str | None = None
+    #: With ``mobility_needs``, what to prioritise: ``weather`` (cover or shade,
+    #: the section 6 behaviour) or ``accessible`` (the step-free route and the
+    #: kerb at the car). Ignored when ``mobility_needs`` is false.
+    priority: Literal["weather", "accessible"] = "weather"
 
 
 class ConfirmRequest(StrictModel):
@@ -294,6 +299,7 @@ async def rides_answer(ride_id: str, req: AnswerRequest) -> RidePlan:
         mobility_needs=req.mobility_needs,
         force_condition=req.force_condition,
         force_time=force_time,
+        priority=req.priority,
     )
 
     # Only a ride that is still predicted needs a car en route. One that is
@@ -306,13 +312,17 @@ async def rides_answer(ride_id: str, req: AnswerRequest) -> RidePlan:
 
 @app.post("/rides/{ride_id}/confirm", response_model=RidePlan)
 async def rides_confirm(ride_id: str, req: ConfirmRequest) -> RidePlan:
-    """Answer the detour question. Only reached when S2 asked for one."""
+    """Answer the detour question. Only reached when S2 asked for one.
+
+    The simulator is left running: ``flow.confirm`` reroutes in place when the
+    destination changes, and the simulator re-reads the route every tick. It is
+    started here if it has already finished (the car arrived while the question
+    was open), so a declined detour still drives the car to the new spot.
+    """
     ride = _get_ride(ride_id)
-    if ride.sim_task and not ride.sim_task.done():
-        ride.sim_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await ride.sim_task
     await flow.confirm(ride, req.accept_detour)
+    if ride.mobility_needs and ride.predicted_spot is not None:
+        flow.start_simulation(ride)
     return _to_plan(ride)
 
 

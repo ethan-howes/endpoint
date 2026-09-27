@@ -33,6 +33,8 @@ from shared.models import (
     RankedSpot,
     RidePhase,
     Spot,
+    WalkRoutesRequest,
+    WalkRoutesResponse,
     utcnow,
 )
 from shared.osm_cache import USER_AGENT  # noqa: F401  (keeps one UA for the project)
@@ -96,7 +98,7 @@ def nearest_spot(spots: list[Spot]) -> Spot | None:
 # --------------------------------------------------------------------------- #
 
 async def fetch_conditions(
-    ride: Ride, spots: list[Spot], pickup_time, force_condition=None, force_time=None
+    ride: Ride, spots: list[Spot], pickup_time, force_condition=None, force_time=None,
 ) -> ConditionsResult | None:
     result = await call_service(
         "S2", "POST", "/conditions/rank",
@@ -107,6 +109,7 @@ async def fetch_conditions(
             wait_minutes=DEFAULT_WAIT_MINUTES,
             force_condition=force_condition,
             force_time=force_time,
+            priority=ride.priority if ride.priority in ("weather", "accessible") else "weather",
         ).model_dump(mode="json"),
         model=ConditionsResult,
     )
@@ -114,6 +117,30 @@ async def fetch_conditions(
     if not result.ok or not isinstance(result.data, ConditionsResult):
         return None
     return result.data
+
+
+async def _nearest_by_walk(ride: Ride, spots: list[Spot], fallback: Spot, pickup_time) -> RankedSpot:
+    """The spot with the shortest real walk, with its route, or ``fallback``."""
+    result = await call_service(
+        "S2", "POST", "/walk/routes",
+        json_body=WalkRoutesRequest(
+            rider_location=ride.rider_location, spots=spots, pickup_time=pickup_time,
+        ).model_dump(mode="json"),
+        model=WalkRoutesResponse,
+    )
+    merge_fallbacks(ride.fallbacks_used, result)
+    routes = result.data.routes if result.ok and isinstance(result.data, WalkRoutesResponse) else []
+    by_id = {s.spot_id: s for s in spots}
+    routes = [r for r in routes if r.spot_id in by_id]
+    if not routes:
+        return as_ranked(fallback, "Fastest pickup", score=1.0)
+    best = min(routes, key=lambda r: (r.walk_m, r.spot_id))
+    spot = by_id[best.spot_id].model_copy(update={"walk_distance_m": best.walk_m})
+    return RankedSpot(
+        spot=spot, score=1.0, reason="Fastest pickup", confidence=spot.confidence,
+        wait_point=spot.stop_point, walk_polyline=best.walk_polyline,
+        indoor_m=best.indoor_m, route_notes=list(best.route_notes),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -125,9 +152,11 @@ async def plan_ride(
     mobility_needs: bool,
     force_condition=None,
     force_time=None,
+    priority: str = "weather",
 ) -> None:
     """Run the predictive phase and populate ``ride`` in place."""
     ride.mobility_needs = mobility_needs
+    ride.priority = priority
 
     # S1 was kicked off at /rides/request so the rider saw the mobility question
     # without waiting for it. Await that task; if there is none (or it failed),
@@ -174,11 +203,15 @@ async def plan_ride(
     pickup_time = utcnow() + timedelta(seconds=route.eta_s)
 
     if not mobility_needs:
-        # §3 step 4: no mobility needs means nearest spot, and S2 is not called
-        # at all. Skipping the call is not just a saving: it is the difference
-        # between telling the rider their car is 20 m away and telling them
-        # something about weather they did not ask about.
-        ride.predicted_spot = as_ranked(nearest, "Fastest pickup", score=1.0)
+        # §3 step 4: no mobility needs means the nearest spot, and no weather or
+        # cover ranking -- the rider did not ask about either. "Nearest" is by
+        # the walk they will actually make: S2's walking routes, not S1's
+        # straight-line x 1.3, which ignores buildings and fences and let the UI
+        # draw a public router's 280 m detour for a 134 m walk. If S2 cannot
+        # route, S1's nearest stands.
+        ride.predicted_spot = await _nearest_by_walk(ride, spots, nearest, pickup_time)
+        if ride.predicted_spot.spot.spot_id != nearest.spot_id:
+            await _dispatch(ride, ride.predicted_spot)
         ride.candidates = [ride.predicted_spot]
         ride.final_spot = ride.predicted_spot
         ride.phase = RidePhase.CONFIRMED
@@ -201,7 +234,9 @@ async def plan_ride(
             ))
     else:
         ride.candidates = [as_ranked(s) for s in spots]
-        best = as_ranked(nearest, "Weather service unavailable; using the nearest spot")
+        # Any S2 failure lands here (timeout, outage, bad response), not only a
+        # weather outage; the specific cause is already in `fallbacks_used`.
+        best = as_ranked(nearest, "Conditions service unavailable; using the nearest spot")
 
     ride.predicted_spot = best
     await _dispatch(ride)
@@ -209,14 +244,26 @@ async def plan_ride(
     ride.rider_message = messages.build(ride)
 
 
-async def _dispatch(ride: Ride) -> None:
-    """Route the car to whichever spot we are currently committed to."""
-    spot = ride.predicted_spot
+async def _dispatch(ride: Ride, target: RankedSpot | None = None) -> None:
+    """Route the car from where it is now to ``target``.
+
+    ``target`` defaults to the spot the ride is committed to (the final spot if
+    there is one, else the prediction). Callers that change the destination pass
+    the new spot explicitly: routing to ``predicted_spot`` unconditionally sent
+    the car to the old spot after a vision switch or a declined detour.
+
+    The new route starts at the car's current position, so progress along it
+    starts at zero. Keeping the old ``car_travelled_m`` measured the new route
+    with the old route's odometer, and the car "arrived" the moment it was
+    rerouted.
+    """
+    spot = target or ride.resolved_spot
     if spot is None:
         return
     route = await routing.route(ride.car_position, spot.spot.stop_point)
     ride.route = route
     ride.eta_s = route.eta_s
+    ride.car_travelled_m = 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -243,7 +290,9 @@ async def on_approach(ride: Ride) -> None:
 
     # §3 step 7: the real-time phase is skipped entirely in neutral conditions --
     # there is nothing to protect against, so looking is wasted time and money.
-    if not ride.mobility_needs or neutral:
+    # Likewise for an accessible pickup: the camera looks for cover and shade,
+    # which is not what chose the spot.
+    if not ride.mobility_needs or neutral or ride.priority == "accessible":
         ride.final_spot = predicted
         ride.phase = RidePhase.CONFIRMED
         ride.rider_message = messages.build(ride)
@@ -262,9 +311,10 @@ async def on_approach(ride: Ride) -> None:
     decision = choose(predicted, alternatives, assessments)
 
     ride.vision_reason = decision.reason
+    ride.vision_switched = decision.switched
     ride.final_spot = decision.chosen
     if decision.switched:
-        await _dispatch(ride)
+        await _dispatch(ride, decision.chosen)
     ride.phase = RidePhase.CONFIRMED
     ride.rider_message = messages.build(ride)
 
@@ -326,22 +376,41 @@ async def confirm(ride: Ride, accept_detour: bool) -> None:
     The first version of this had it exactly inverted, which produced the worst
     possible combination: a rider who said "yes, I'll walk the extra two minutes
     for the awning" was moved to the uncovered spot beside them.
+
+    Answering is part of the *predictive* phase, not the end of the ride: the
+    car keeps driving and the real-time phase (§3 steps 7-9) still runs on
+    approach. The previous version marked the ride confirmed here, and the route
+    handler stopped the simulator, so the car froze where it was and vision never
+    looked at the spot the rider chose. The simulator is (re)started by the route
+    handler after this returns.
     """
+    ride.pending_confirmation = False
     predicted = ride.predicted_spot
     if predicted is None:
         ride.phase = RidePhase.CONFIRMED
         return
 
-    if accept_detour:
-        ride.final_spot = predicted
-    else:
+    if not accept_detour:
         near = nearest_spot(ride.spots)
-        ride.final_spot = as_ranked(near, "Closest legal spot; you declined the detour") \
-            if near is not None else predicted
+        if near is not None and near.spot_id != predicted.spot.spot_id:
+            # Prefer S2's own ranking of that spot, which carries its real cover
+            # and wait point, over a bare wrapper.
+            target = next(
+                (c for c in ride.candidates if c.spot.spot_id == near.spot_id),
+                None,
+            ) or as_ranked(near, "Closest legal spot; you declined the detour")
+            if ride.approach_done:
+                # The car already reached the approach threshold while the
+                # question was open, so the camera looked at the old spot. The
+                # rider's choice still wins, and its finding no longer applies.
+                ride.final_spot = target
+                ride.vision_reason = ""
+                ride.vision_switched = False
+            else:
+                ride.predicted_spot = target
+            await _dispatch(ride, target)
 
-    ride.pending_confirmation = False
-    await _dispatch(ride)
-    ride.phase = RidePhase.CONFIRMED
+    ride.phase = RidePhase.CONFIRMED if ride.approach_done else RidePhase.PREDICTED
     ride.rider_message = messages.build(ride)
 
 

@@ -98,7 +98,7 @@ def generate_candidates(
     span rather than onto its endpoints, where intersections already exclude
     them anyway.
     """
-    if road.polyline.length < step_m:
+    if road.polyline.length < step_m or not road.stoppable:
         return []
 
     out: list[Candidate] = []

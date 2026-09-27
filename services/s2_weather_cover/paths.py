@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from shared.config import SETTINGS
+from shared.config import KERB_VALUE_KIND, SETTINGS
 from shared.fixtures import cache_key
 from shared.geo import LocalFrame, expanded_query_bbox, tile_cache_id
 from shared.osm_cache import afetch_overpass
@@ -44,6 +44,10 @@ class PathWay:
     points: tuple[tuple[float, float], ...]
     highway: str
     covered: bool = False  # tagged covered / building passage / corridor
+    #: ``footway=*`` ("crossing", "sidewalk", ...) and ``surface=*``, for the
+    #: accessible route costs.
+    footway: str = ""
+    surface: str = ""
 
 
 @dataclass(frozen=True)
@@ -57,12 +61,17 @@ class PathMap:
     entrances: dict[int, tuple[float, float]] = field(default_factory=dict)
     generated_at: float = 0.0
     cache_id: str = ""
+    #: OSM node id -> "flush" | "lowered" | "raised", for kerb nodes.
+    kerbs: dict[int, str] = field(default_factory=dict)
+    #: OSM node id -> ``level=*`` of an entrance, where tagged.
+    entrance_levels: dict[int, str] = field(default_factory=dict)
 
     def summary(self) -> dict[str, int]:
         return {
             "ways": len(self.ways),
             "covered_ways": sum(1 for w in self.ways if w.covered),
             "entrances": len(self.entrances),
+            "kerbs": len(self.kerbs),
         }
 
 
@@ -118,11 +127,19 @@ def parse_paths(
 
     ways: list[PathWay] = []
     entrances: dict[int, tuple[float, float]] = {}
+    kerbs: dict[int, str] = {}
+    levels: dict[int, str] = {}
     for el in payload.get("elements") or []:
         tags = el.get("tags") or {}
         if el.get("type") == "node":
+            nid = int(el["id"])
             if "entrance" in tags and el.get("lat") is not None and el.get("lon") is not None:
-                entrances[int(el["id"])] = frame.to_m(float(el["lat"]), float(el["lon"]))
+                entrances[nid] = frame.to_m(float(el["lat"]), float(el["lon"]))
+                if tags.get("level"):
+                    levels[nid] = str(tags["level"]).strip()
+            kind = KERB_VALUE_KIND.get((tags.get("kerb") or "").strip().lower())
+            if kind is not None:
+                kerbs[nid] = kind
             continue
         if el.get("type") != "way" or not is_walkable(tags):
             continue
@@ -141,6 +158,8 @@ def parse_paths(
             points=tuple(p[1] for p in pairs),
             highway=tags.get("highway", ""),
             covered=_is_covered(tags),
+            footway=(tags.get("footway") or "").strip().lower(),
+            surface=(tags.get("surface") or "").strip().lower(),
         ))
 
     return PathMap(
@@ -150,6 +169,8 @@ def parse_paths(
         entrances=entrances,
         generated_at=time.time(),
         cache_id=cache_id,
+        kerbs=kerbs,
+        entrance_levels=levels,
     )
 
 

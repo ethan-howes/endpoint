@@ -114,6 +114,11 @@ class Decision:
     reason: str = ""
     outcomes: dict[str, FusionOutcome] = field(default_factory=dict)
     considered: list[str] = field(default_factory=list)
+    #: Whether any spot in the pool was actually assessed by the camera. False
+    #: when S3 is absent or returned nothing usable, and then ``reason`` is empty:
+    #: there is no camera finding to report, and inventing one ("the camera
+    #: confirmed...") tells the rider something that never happened.
+    vision_ran: bool = False
 
 
 def _dist_m(a, b) -> float:
@@ -157,19 +162,41 @@ def choose(
     the purpose).
     """
     pool = [predicted, *alternatives]
+    considered = [c.spot.spot_id for c in pool]
     outcomes: dict[str, FusionOutcome] = {}
     for c in pool:
         outcomes[c.spot.spot_id] = fuse(c, assessments.get(c.spot.spot_id))
 
-    current = outcomes[predicted.spot.spot_id]
+    assessed = {
+        sid for sid in considered
+        if (va := assessments.get(sid)) is not None and va.vision_score is not None
+    }
+    if not assessed:
+        # No camera result for any spot. The prediction stands, and the decision
+        # carries no reason: every camera sentence below would be untrue here.
+        return Decision(
+            chosen=predicted, switched=False, reason="",
+            outcomes=outcomes, considered=considered, vision_ran=False,
+        )
+
+    pred_id = predicted.spot.spot_id
+    current = outcomes[pred_id]
     best_id = max(outcomes, key=lambda sid: outcomes[sid].score)
     best = next(c for c in pool if c.spot.spot_id == best_id)
 
-    if best_id == predicted.spot.spot_id:
+    if best_id == pred_id:
+        if current.denied_by_vision:
+            reason = (
+                "the camera couldn't see the cover the map showed here, "
+                "and no nearby spot looked clearly better"
+            )
+        elif pred_id in assessed:
+            reason = "the camera confirmed the predicted spot"
+        else:
+            reason = "the camera checked the nearby spots and none looked better"
         return Decision(
-            chosen=predicted, switched=False,
-            reason="camera confirmed the predicted spot",
-            outcomes=outcomes, considered=[c.spot.spot_id for c in pool],
+            chosen=predicted, switched=False, reason=reason,
+            outcomes=outcomes, considered=considered, vision_ran=True,
         )
 
     extra_walk = best.spot.walk_distance_m - predicted.spot.walk_distance_m
@@ -177,7 +204,7 @@ def choose(
         return Decision(
             chosen=predicted, switched=False,
             reason="an alternative scored slightly better, not enough to move the car",
-            outcomes=outcomes, considered=[c.spot.spot_id for c in pool],
+            outcomes=outcomes, considered=considered, vision_ran=True,
         )
     if extra_walk > MAX_EXTRA_WALK_M:
         return Decision(
@@ -186,11 +213,11 @@ def choose(
                 f"a better spot is {extra_walk:.0f} m farther to walk, "
                 "which is not worth it"
             ),
-            outcomes=outcomes, considered=[c.spot.spot_id for c in pool],
+            outcomes=outcomes, considered=considered, vision_ran=True,
         )
 
     return Decision(
         chosen=best, switched=True,
         reason=outcomes[best_id].reason or "the camera found better cover",
-        outcomes=outcomes, considered=[c.spot.spot_id for c in pool],
+        outcomes=outcomes, considered=considered, vision_ran=True,
     )

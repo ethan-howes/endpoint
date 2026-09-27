@@ -21,7 +21,8 @@ message says the spot is the rider's own location, because that is what it is.
 
 from __future__ import annotations
 
-from shared.models import Condition, Confidence, RankedSpot, RidePhase, WeatherReport
+from shared.config import SETTINGS
+from shared.models import Condition, Confidence, CurbAccess, RankedSpot, RidePhase, WeatherReport
 
 from .ride import Ride
 
@@ -49,6 +50,8 @@ def _hedge(spot: RankedSpot) -> str:
     hedges that matter -- which is the failure mode a confidence label is
     supposed to prevent.
     """
+    if SETTINGS.demo_hide_uncertainty:
+        return ""
     if spot.confidence == Confidence.UNVERIFIED:
         return " (we're inferring this from the map, not from a curb regulation feed)"
     return ""
@@ -71,37 +74,109 @@ def build(ride: Ride) -> str:
         )
 
     # --- the camera moved the car ---
-    if phase == RidePhase.CONFIRMED and ride.final_spot is not None and ride.vision_reason:
-        if "not enough to move" in ride.vision_reason or "farther to walk" in ride.vision_reason:
-            return (
-                f"We checked the nearby spots and kept the closest one, {_walk(spot)}. "
-                f"{ride.vision_reason.capitalize()}."
-            )
+    # Only when fusion actually switched spots. A camera that kept the prediction
+    # adds its finding to the ordinary message below, and a camera that never ran
+    # adds nothing: "we moved your pickup" and "the camera confirmed" are claims
+    # about events, and they must not appear when the events did not happen.
+    if phase == RidePhase.CONFIRMED and ride.final_spot is not None and ride.vision_switched:
         return (
-            f"We moved your pickup to the spot by {spot.spot.street_name or 'the cover'}, "
-            f"{_walk(spot)}. {ride.vision_reason}"
-        )
+            f"We moved your pickup to the spot {_where(spot)}, {_walk(spot)}. "
+            f"{_sentence(ride.vision_reason)}{_access(spot)}"
+        ).rstrip()
 
     # --- no mobility needs: the product is just a pickup, so say that ---
     if not ride.mobility_needs:
         return f"Your car will pick you up {_walk(spot)} {_where(spot)}."
 
     # --- the section 7 table ---
-    if condition == Condition.RAIN:
-        where = "under cover" if spot.cover_feature else _where(spot)
-        lead = (
-            f"It's raining when your car arrives, so wait {where}, {_walk(spot)}."
-        )
+    if ride.priority == "accessible":
+        a = spot.accessibility
+        how = " on a step-free route" if a is not None and a.step_free else ""
+        weather = {Condition.RAIN: " It's raining at pickup.", Condition.SUN: " It's sunny at pickup."}.get(condition, "")
+        lead = f"Your car will pick you up {_walk(spot)} {_where(spot)}{how}.{weather}"
+    elif condition == Condition.RAIN:
+        lead = f"It's raining when your car arrives, {_rain_wait(spot)}"
     elif condition == Condition.SUN:
         where = "in the shade" if spot.cover_feature else _where(spot)
         lead = f"It's sunny when your car arrives, so wait {where}, {_walk(spot)}."
     else:
         lead = f"Your car will pick you up {_walk(spot)} {_where(spot)}."
+    lead += _access(spot)
 
     if phase == RidePhase.PREDICTED:
         lead += f" {_preview(ride)}"
+    elif phase == RidePhase.CONFIRMED and ride.vision_reason:
+        lead += f" {_sentence(ride.vision_reason)}"
 
     return lead + _hedge(spot)
+
+
+def _rain_wait(spot: RankedSpot) -> str:
+    """Where to wait in the rain, and how much open ground is left after that.
+
+    ``gap_m`` is the distance from the wait point to the car -- the stretch the
+    rider walks uncovered once the car has arrived. The ranking does not cap it
+    (a long covered walk with a long last stretch can still be the driest
+    option), so the message states it rather than implying the rider is covered
+    all the way. Indoors is a wait point too: the exposure ranking sets
+    ``gap_m`` with no cover feature when the last dry place is a building.
+    """
+    gap = spot.gap_m
+    if gap is None:
+        return f"and your pickup is {_walk(spot)} {_where(spot)}."
+    where = "under cover" if spot.cover_feature else "indoors"
+    if gap <= SETTINGS.cover_gap_free_m:
+        return f"so wait {where} {_walk(spot)}; the car stops right beside it."
+    return (
+        f"so wait {where} {_walk(spot)}, then it's {gap:.0f} m uncovered to the car "
+        f"once it arrives."
+    )
+
+
+def _access(spot: RankedSpot) -> str:
+    """What a rider with a walker or a cane meets on the way and at the car door.
+
+    Only for riders who asked for comfort, and only what the data supports. A
+    building is named only because the route uses it, and S2 only routes through
+    buildings it believes are open at pickup time, so "while it's open" is true
+    whichever hours applied. An unmapped kerb is said to be unconfirmed, never
+    absent: around FIU mappers recorded ramps, not the kerbs without one.
+    """
+    parts: list[str] = []
+    through = [n[len("through "):] for n in spot.route_notes if n.startswith("through ")]
+    if through:
+        parts.append(f"Your route goes through {' and '.join(through)} while it's open.")
+    if any(n.startswith("leaves by the nearest side") for n in spot.route_notes):
+        parts.append("Leave the building on the side nearest the car; "
+                     "its doors there aren't on our map.")
+    if "route includes steps" in spot.route_notes:
+        parts.append("The walk includes steps.")
+    if "crosses a road at a raised curb" in spot.route_notes:
+        parts.append("One crossing on the way has a raised curb.")
+
+    access = spot.spot.curb_access
+    ramp = spot.spot.ramp_distance_m
+    if access == CurbAccess.FLUSH:
+        parts.append("The curb at the car is level with the road.")
+    elif access == CurbAccess.LOWERED:
+        if ramp is not None and ramp >= 3:
+            parts.append(f"There's a curb ramp {ramp:.0f} m from the car.")
+        else:
+            parts.append("There's a curb ramp right by the car.")
+    elif access == CurbAccess.RAISED:
+        parts.append("There's a raised curb at the car.")
+    elif not SETTINGS.demo_hide_uncertainty:
+        parts.append("We couldn't confirm a curb ramp at this spot.")
+    return (" " + " ".join(parts)) if parts else ""
+
+
+def _sentence(text: str) -> str:
+    """``text`` as a sentence: capitalised, with a full stop. Empty stays empty."""
+    text = text.strip()
+    if not text:
+        return ""
+    text = text[0].upper() + text[1:]
+    return text if text.endswith((".", "!", "?")) else text + "."
 
 
 def _preview(ride: Ride) -> str:

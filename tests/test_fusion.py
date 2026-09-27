@@ -251,6 +251,35 @@ class TestChoose:
         assert d.switched is False
         assert d.chosen.spot.spot_id == "s1_0001"
 
+    def test_no_vision_at_all_claims_no_camera_finding(self):
+        """REGRESSION. With S3 absent, `choose` used to report "camera confirmed
+        the predicted spot", and the rider was told the camera had checked a spot
+        no camera ever saw."""
+        p = spot("s1_0001", 20.0, lat=25.7570, lng=-80.3720)
+        d = choose(p, [], {})
+        assert d.vision_ran is False
+        assert d.reason == ""
+
+    def test_an_assessment_without_a_score_does_not_count_as_vision(self):
+        """S3's documented fallback is `vision_score: null`. That is a failed
+        look, not a confirmation."""
+        p = spot("s1_0001", 20.0, lat=25.7570, lng=-80.3720)
+        d = choose(p, [], {p.spot.spot_id: vision(p.spot.spot_id, None, conf=0.9)})
+        assert d.vision_ran is False
+        assert "confirmed" not in d.reason
+
+    def test_a_denied_prediction_that_is_kept_is_not_called_confirmed(self):
+        """The camera said the cover is not there, and no alternative was clearly
+        better, so the prediction stands. Calling that "confirmed" inverts what the
+        camera actually reported."""
+        p = spot("s1_0001", 20.0, lat=25.7570, lng=-80.3720)
+        p.score = 0.9
+        d = choose(p, [], {p.spot.spot_id: vision(p.spot.spot_id, 0.05, conf=0.9)})
+        assert d.switched is False
+        assert d.vision_ran is True
+        assert "confirmed" not in d.reason
+        assert "couldn't see the cover" in d.reason
+
     def test_every_considered_spot_is_reported(self):
         p = spot("s1_0001", 20.0, lat=25.7570, lng=-80.3720)
         a = spot("s1_0002", 20.0, lat=25.7571, lng=-80.3720)

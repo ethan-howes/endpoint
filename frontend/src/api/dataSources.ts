@@ -40,8 +40,8 @@ const SOURCES = {
   },
   sidewalk: {
     label: 'Sidewalk accessibility',
-    service: 'Accessibility service (not assigned yet)',
-    status: 'placeholder',
+    service: 'S2 walk_network.py (OSM steps, kerbs at crossings, doors; no slope or width data)',
+    status: BACKEND,
     field: 'RankedSpot.accessibility, RankedSpot.walk_polyline',
   },
   routing: {

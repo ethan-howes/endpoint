@@ -75,6 +75,8 @@ class Ride:
 
     # --- filled in by /rides/{id}/answer ---
     mobility_needs: bool = False
+    #: "weather" | "accessible": what a rider with mobility needs asked for.
+    priority: str = "weather"
     phase: RidePhase = RidePhase.PREDICTED
     pending_confirmation: bool = False
 
@@ -100,7 +102,11 @@ class Ride:
     #: Vision assessments keyed by spot_id, kept for the fusion step and for
     #: explaining a switch after the fact.
     vision: dict[str, object] = field(default_factory=dict)
+    #: The camera's finding, empty when vision did not run (S3 absent or no
+    #: usable assessment). The message builder reads this and ``vision_switched``
+    #: rather than parsing the reason text.
     vision_reason: str = ""
+    vision_switched: bool = False
 
     # --- machinery ---
     #: S1 request started at /rides/request so the rider sees the mobility

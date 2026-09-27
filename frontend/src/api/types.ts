@@ -36,6 +36,9 @@ export interface Spot {
   /** Distance to the nearest exclusion buffer (hydrant, crossing, bus stop...). */
   clearance_m?: number | null
   legality_basis?: 'official_regulation' | 'tagged_permissive' | 'inferred_standard' | 'unknown'
+  /** Kerb between the sidewalk and the car door. 'unknown' = nothing mapped, not "no ramp". */
+  curb_access?: 'flush' | 'lowered' | 'raised' | 'unknown'
+  ramp_distance_m?: number | null
 }
 
 /** S2 Weather and Cover, module 1 */
@@ -66,13 +69,13 @@ export interface CoverFeature {
 }
 
 /** Sidewalk accessibility of the walk to a pickup (frontend extension; see ENDPOINT.md §12 stretch goal). */
+/** S2 RouteAccessibility: what the walk is like, from OSM. No slope, surface or width data exists for FIU, so none is sent. */
 export interface AccessibilityInfo {
   step_free: boolean
   curb_ramps: LatLng[]
-  max_running_slope_pct: number
-  max_cross_slope_pct: number
-  surface: string
-  min_width_m: number
+  unramped_crossings: number
+  raised_crossings: number
+  through_buildings: string[]
   notes: string[]
   source: string
 }
@@ -151,7 +154,7 @@ export interface RideRequestResponse {
 
 export interface AnswerBody {
   mobility_needs: boolean
-  pickup_mode?: PickupMode // frontend-only: never sent (the orchestrator rejects unknown fields)
+  pickup_mode?: PickupMode // frontend-only; sent to the orchestrator as `priority` (accessible | weather)
   force_condition?: Condition | null
   force_time?: string | null
 }

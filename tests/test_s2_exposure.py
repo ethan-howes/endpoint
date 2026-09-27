@@ -251,3 +251,96 @@ class TestServiceSelection:
         result = await service.rank(self._request())
         assert result.ranked[0].wet_m is None
         assert any("no walking network" in f for f in result.fallbacks_used)
+
+
+class TestWalkRoutes:
+    """``POST /walk/routes``: routes only, for rides with no comfort features."""
+
+    @pytest.fixture(autouse=True)
+    def _stubs(self, monkeypatch, campus):
+        path_map, cover_map, shade_map, spots = campus
+        self.spots = spots
+        service.clear_caches()
+
+        async def covers(tile, radius, fallbacks, frame):
+            return cover_map
+
+        async def shade(tile, radius, fallbacks, frame):
+            return shade_map
+
+        async def paths(tile, radius, fallbacks, frame):
+            return path_map
+
+        monkeypatch.setattr(service, "_fetch_covers", covers)
+        monkeypatch.setattr(service, "_fetch_shade", shade)
+        monkeypatch.setattr(service, "_fetch_paths", paths)
+        self.monkeypatch = monkeypatch
+        yield
+        service.clear_caches()
+
+    @pytest.mark.anyio
+    async def test_returns_a_real_route_per_reachable_spot(self):
+        from shared.models import WalkRoutesRequest
+
+        res = await service.walk_routes(WalkRoutesRequest(rider_location=ll(0, 0), spots=self.spots))
+        by_id = {r.spot_id: r for r in res.routes}
+        assert set(by_id) == {"A", "B"}
+        assert by_id["A"].walk_m == pytest.approx(54.0, abs=1.5)
+        assert by_id["A"].walk_polyline
+
+    @pytest.mark.anyio
+    async def test_no_network_is_an_empty_answer_with_a_note(self):
+        from shared.models import WalkRoutesRequest
+
+        async def none(tile, radius, fallbacks, frame):
+            return None
+
+        self.monkeypatch.setattr(service, "_fetch_paths", none)
+        res = await service.walk_routes(WalkRoutesRequest(rider_location=ll(0, 0), spots=self.spots))
+        assert res.routes == []
+        assert any("no walking network" in f for f in res.fallbacks_used)
+
+
+class TestAccessiblePriority:
+    """``priority=accessible`` ranks by the easiest walk, not by rain cover."""
+
+    @pytest.fixture(autouse=True)
+    def _stubs(self, monkeypatch, campus):
+        path_map, cover_map, shade_map, spots = campus
+        self.spots = spots
+        service.clear_caches()
+
+        async def covers(tile, radius, fallbacks, frame):
+            return cover_map
+
+        async def shade(tile, radius, fallbacks, frame):
+            return shade_map
+
+        async def paths(tile, radius, fallbacks, frame):
+            return path_map
+
+        monkeypatch.setattr(service, "_fetch_covers", covers)
+        monkeypatch.setattr(service, "_fetch_shade", shade)
+        monkeypatch.setattr(service, "_fetch_paths", paths)
+        yield
+        service.clear_caches()
+
+    def _req(self, priority):
+        return RankRequest(
+            rider_location=ll(0, 0), spots=self.spots,
+            pickup_time=datetime(2026, 9, 28, 16, 0, tzinfo=timezone.utc),
+            force_condition=Condition.RAIN, priority=priority,
+        )
+
+    @pytest.mark.anyio
+    async def test_accessible_and_weather_choose_differently(self):
+        """In the campus fixture the covered exit (A) is the dry choice and the
+        nearer open kerb (B) the shorter walk."""
+        weather = await service.rank(self._req("weather"))
+        access = await service.rank(self._req("accessible"))
+        assert weather.ranked[0].spot.spot_id == "A"
+        assert access.ranked[0].spot.spot_id == "B"
+        assert access.mode is Condition.RAIN  # the weather is still reported
+        assert access.ranked[0].accessibility is not None
+        assert access.ranked[0].reason.startswith("Step-free route")
+        assert access.needs_rider_confirmation is False

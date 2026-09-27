@@ -11,6 +11,7 @@ and makes the tests flaky.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from shared.config import (
@@ -22,9 +23,12 @@ from shared.config import (
     SETTINGS,
 )
 from shared.geo import LocalFrame
-from shared.models import Confidence, LatLng, LegalityBasis, Spot, SpotType
+from shared.models import Confidence, CurbAccess, LatLng, LegalityBasis, Spot, SpotType
 
+from . import curb_access, lots
 from .legality import Verdict
+from .lots import LotStop
+from .network import Kerb, StreetNetwork
 
 #: Higher is better, for the dedupe tie-break. The ordering itself lives on
 #: ``Confidence.rank`` in shared/models.py: it is a property of the tier, not of
@@ -99,18 +103,23 @@ def dedupe(scored: list[ScoredCandidate], radius_m: float = DEDUPE_RADIUS_M) -> 
 
 
 def to_spots(
-    frame: LocalFrame, ordered: list[ScoredCandidate], prefix: str = "s1"
+    frame: LocalFrame,
+    ordered: list[ScoredCandidate],
+    prefix: str = "s1",
+    kerbs: Sequence[Kerb] = (),
 ) -> list[Spot]:
     """Build the wire model, assigning the sequential ids ENDPOINT.md shows.
 
     Ids are assigned after sorting and capping, so they are stable for a given
-    rider location and match the documented ``s1_0042`` shape.
+    rider location and match the documented ``s1_0042`` shape. Curb access is
+    assessed here, after the cap, so it costs 30 lookups rather than thousands.
     """
     spots: list[Spot] = []
     for i, sc in enumerate(ordered, start=1):
         cand = sc.verdict.candidate
         road = cand.road
         lat, lng = frame.to_ll(cand.x, cand.y)
+        access, ramp_m, access_source = curb_access.assess(cand, list(kerbs))
 
         notes: list[str] = []
         if not road.width_known:
@@ -119,6 +128,8 @@ def to_spots(
             notes.append("across the street from the rider")
         if sc.verdict.legality and sc.verdict.legality.basis == LegalityBasis.INFERRED_STANDARD:
             notes.append("legality inferred; no parking restriction is mapped")
+        if access is CurbAccess.UNKNOWN:
+            notes.append("no curb ramp or flush curb mapped near this spot")
 
         spots.append(
             Spot(
@@ -141,6 +152,9 @@ def to_spots(
                     if sc.verdict.legality
                     else LegalityBasis.UNKNOWN
                 ),
+                curb_access=access,
+                ramp_distance_m=ramp_m,
+                curb_access_source=access_source,
             )
         )
     return spots
@@ -152,8 +166,15 @@ def rank(
     scored: list[ScoredCandidate],
     radius_m: float = DEFAULT_RADIUS_M,
     max_spots: int = MAX_SPOTS,
+    kerbs: Sequence[Kerb] = (),
+    lot_stops: Sequence[LotStop] = (),
+    network: StreetNetwork | None = None,
 ) -> tuple[list[Spot], int, bool]:
-    """Deduplicate, sort, cap. Returns ``(spots, total_before_cap, truncated)``."""
+    """Deduplicate, sort, cap. Returns ``(spots, total_before_cap, truncated)``.
+
+    Kerb candidates and parking-lot stops compete on walk distance for the same
+    ``max_spots`` slots, and ids are assigned over the merged order.
+    """
     # Overpass `around:` returns ways with any node in range, so a road can
     # contribute candidates well outside the requested radius. Filter explicitly.
     rx, ry = frame.to_m(rider.lat, rider.lng)
@@ -164,10 +185,23 @@ def rank(
     ]
 
     deduped = dedupe(in_radius)
-    ordered = sorted(deduped, key=lambda s: (s.walk_distance_m, s.verdict.candidate.road.way_id))
-    total = len(ordered)
-    capped = ordered[:max_spots]
-    return to_spots(frame, capped), total, total > len(capped)
+    merged: list[tuple[float, int, str, object]] = [
+        (sc.walk_distance_m, 0, sc.verdict.candidate.road.way_id, sc) for sc in deduped
+    ]
+    if network is not None:
+        merged += [(ls.walk_m, 1, ls.lot_id, ls) for ls in lot_stops]
+    merged.sort(key=lambda t: t[:3])
+    total = len(merged)
+    capped = merged[:max_spots]
+
+    spots: list[Spot] = []
+    for i, (_, kind, _, item) in enumerate(capped, start=1):
+        sid = f"s1_{i:04d}"
+        if kind == 0:
+            spots.append(to_spots(frame, [item], kerbs=kerbs)[0].model_copy(update={"spot_id": sid}))
+        else:
+            spots.append(lots.to_spot(frame, network, item, sid))
+    return spots, total, total > len(capped)
 
 
 __all__ = [
