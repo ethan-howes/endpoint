@@ -208,7 +208,9 @@ class TestAccessibleCosts:
         ]
         r = route(build(blocks=[], ways=ways), start=(0, 0), stop=(22, 0))
         assert "route includes steps" not in r.notes
-        assert r.length > 40
+        steps = LineString([at(0, 0), at(20, 0)])
+        for a, b in zip(r.points, r.points[1:]):
+            assert LineString([a, b]).intersection(steps).length < 0.5
 
     def test_steps_are_used_and_flagged_when_they_are_the_only_way(self):
         ways = [way(1, [(1, 0, 0), (2, 20, 0)], highway="steps")]
@@ -311,3 +313,31 @@ class TestRouteAccessibility:
         ways = [way(1, [(1, 0, 0), (2, 20, 0)], highway="steps")]
         r = route(build(blocks=[], ways=ways), start=(0, 0), stop=(22, 0))
         assert walk_network.to_accessibility(r, FRAME).step_free is False
+
+
+class TestLeavingABuilding:
+    def test_a_door_line_may_not_leave_a_concave_building(self):
+        """REGRESSION. In an L-shaped building the straight line from the rider
+        to a far door crossed the courtyard outside -- past the car -- and was
+        counted as dry, indoor walking."""
+        ell = ShadeBlock(
+            block_id="ell", height_m=10.0, kind="building", building="university", name="Ell",
+            shape=Polygon([at(0, 0), at(40, 0), at(40, 10), at(10, 10), at(10, 40), at(0, 40)]),
+        )
+        # One door at the far end of each arm; the rider is in the vertical arm.
+        ways = [way(1, [(10, 40, 5), (2, 60, 5)]), way(2, [(20, 5, 40), (3, 5, 60)]),
+                way(3, [(2, 60, 5), (4, 60, 60), (3, 5, 60)])]
+        net = build(blocks=[ell], ways=ways)
+        s = walk_network.search(net, at(5, 30), mode="length")
+        door_links = [lk for lk in s.rider_links if lk.flag != "wall_exit"]
+        assert {lk.node for lk in door_links} == {20}  # 40,5 is only reachable by leaving
+
+    def test_a_rider_can_walk_straight_out_toward_a_nearby_car(self):
+        """"Nearest side" means the side facing the car, not whichever wall is
+        nearest the rider."""
+        ways = [way(1, [(1, -40, 0), (10, -10, 0)]),        # the only door, west
+                way(2, [(5, 30, -20), (6, 30, 20)])]          # a path east, no door
+        net = build(ways=ways)
+        r = route(net, start=(8, 0), stop=(20, 0), when=NOON)
+        assert r.length == pytest.approx(12.0, abs=0.5)
+        assert "leaves by the nearest side; no door is mapped there" in r.notes
