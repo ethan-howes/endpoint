@@ -1,0 +1,87 @@
+# Everything excluded from the Docker build context.
+#
+# The context is the repo root, because shared/ lives there and every service
+# imports it. That makes this file load-bearing rather than an optimisation: the
+# repo carries a .venv, a node_modules and ~19 MB of tracked vision videos, and
+# without pruning them the context is over a gigabyte and every one of those
+# layers is invalidated by unrelated edits.
+#
+# Note what is NOT ignored: data/cache/overpass/. It is copied into the base
+# image deliberately (docker/base/Dockerfile) so a fresh `docker compose up`
+# answers from seeded data instead of making every container race Overpass for
+# the same tiles.
+
+# --- secrets ---
+# Never bake credentials into an image layer. Compose passes configuration in as
+# environment variables, and every key the services actually read (MOCK,
+# DEMO_BBOX, DEMO_RIDER, DEMO_TZ, TRAFFIC_SIDE, S1_URL, S2_URL, S3_URL) is set
+# explicitly in docker-compose.yml.
+.env
+.env.local
+secrets.env
+
+# --- vcs and editor state ---
+.git
+.gitignore
+.github
+.idea
+.vscode
+.DS_Store
+*.swp
+
+# --- python ---
+# The local venv is 3.14 with a different dependency set than any image, and
+# copying it in is how you get a container that runs the host's site-packages
+# instead of the ones its own Dockerfile installed.
+.venv
+venv
+__pycache__
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+.coverage
+htmlcov
+
+# --- logs and transient output ---
+logs/
+# Local uvicorn logs, not container logs (those go to `docker logs`).
+*.log
+
+# --- node ---
+frontend/node_modules
+# A host build of the same app; the image builds its own from source.
+frontend/dist
+frontend/.vite
+# Vite env files are host-local configuration. The image sets VITE_* through
+# build ARGs, and letting a developer's frontend/.env into the build would make
+# the image depend on whose machine built it.
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+
+# --- data ---
+# The Overpass cache is intentionally kept (see header). These two subtrees are
+# not: fetched imagery and derived rasters, regenerable and large.
+data/cache/images
+data/cache/routes
+*.tif
+*.npy
+*.npz
+
+# --- the vision service ---
+# services/vision is out of scope for this compose file: it is a batch
+# Mask2Former pipeline with no HTTP surface, not one of the four deployed
+# processes. Excluded rather than merely unused because it carries ~19 MB of
+# tracked MP4s and PNGs, and a 14 MB results/videos/selftest_compare.png.
+services/vision
+src/
+
+# --- misc ---
+# Model weights, wherever they land.
+*.pt
+*.pth
+*.safetensors
+*.onnx
