@@ -8,3 +8,15 @@
     <br>
     <br>
 </div>
+
+# file structure
+└── 󰣞 src
+    ├──  app
+    │   ├──  backend
+    │   └──  frontend
+    └──  backend
+        ├──  orchestrator
+        └──  services
+            ├──  map
+            ├──  vision
+            └──  weathe
