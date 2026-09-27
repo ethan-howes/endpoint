@@ -93,14 +93,18 @@ Each of these is handled in `src/api/orchestrator.ts` and can be removed once th
 
 ## Asks for the backend
 
-1. **Sun mode is too slow.** With real candidates, S2's sun/shade ranking takes more than the orchestrator's 6 s S2 timeout, so every sun ride falls back to "Weather service unavailable; using the nearest spot". Rain takes about 2 s. S2 also keeps computing after the timeout, which delays the next request.
-2. **Separate dispatch from `/answer`**, e.g. `POST /rides/{id}/dispatch`. The `flow.start_simulation` docstring already anticipates this.
-3. **Simulate the car for rides without mobility needs**, and restart the simulator after `skip_to_arrival`.
-4. **A trip leg:** `POST /rides/{id}/start_trip {destination}` plus a trip status on `GET /rides/{id}`.
-5. **Pass S2 `overlays` through on `RidePlan`**, meaning `cover_features` and `shade_geojson`, so the map can draw all nearby cover and shade.
-6. **`geometry_wkt` in lng/lat**, as ENDPOINT.md §5 implies.
-7. **The rider message says "camera confirmed the predicted spot" even when S3 was unreachable.**
-8. **Optional:** accept `pickup_mode`, and provide the walking route and sidewalk accessibility data (steps, curb ramps, slope) for the accessible option.
+Done on `feat/s2-rain-exposure`:
+- ~~Sun mode too slow~~: S2's sun ranking went from 16 s to about 1.4 s, so sun rides no longer time out.
+- ~~Walking route~~: in rain mode S2 now ranks by metres walked in the rain and sends `wet_m`, `dry_m` and `walk_polyline` on each ranked spot. The app draws that route and shows "N m in the rain" instead of fetching a foot route in the browser.
+
+Still open:
+1. **Separate dispatch from `/answer`**, e.g. `POST /rides/{id}/dispatch`. The `flow.start_simulation` docstring already anticipates this.
+2. **Simulate the car for rides without mobility needs**, and restart the simulator after `skip_to_arrival`.
+3. **A trip leg:** `POST /rides/{id}/start_trip {destination}` plus a trip status on `GET /rides/{id}`.
+4. **Pass S2 `overlays` through on `RidePlan`** (`cover_features`, `shade_geojson`) so the map can draw all nearby cover and shade.
+5. **`geometry_wkt` in lng/lat**, as ENDPOINT.md §5 implies. It's UTM metres today, and the app converts it.
+6. **The rider message says "camera confirmed the predicted spot" even when S3 was unreachable.**
+7. **Optional:** accept `pickup_mode`, and add sidewalk accessibility data (steps, curb ramps, slope). OSM at FIU has 205 mapped curb ramps and 13 staircases, so the new walking network in `paths.py` could carry this.
 
 ## Placeholders still in the UI
 

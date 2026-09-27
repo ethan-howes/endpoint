@@ -81,6 +81,26 @@ function WeatherCard({ weather }: { weather: WeatherReport | null }) {
 /** Rain cover or sun shade at the chosen spot, depending on the weather at pickup. */
 function ConditionsCard({ spot, weather }: { spot: RankedSpot; weather: WeatherReport | null }) {
   const condition = weather?.condition
+  if (condition === 'rain' && spot.wet_m != null) {
+    // S2's exposure ranking: how much of the actual walk is in the rain.
+    const wet = Math.round(spot.wet_m)
+    const dry = Math.round(spot.dry_m ?? 0)
+    return (
+      <div className="card">
+        <div className="card-row">
+          <IconUmbrella />
+          <div className="grow">
+            <strong>{wet < 1 ? 'Covered the whole way to the car' : `${wet} m in the rain, ${dry} m under cover or indoors`}</strong>
+            <span className="muted small">
+              {spot.gap_m == null
+                ? 'No cover along this walk; this spot keeps the rain to a minimum'
+                : `Wait ${spot.cover_feature ? `under the ${spot.cover_feature.kind.replace(/_/g, ' ')}` : 'indoors'} until the car arrives, then ${Math.round(spot.gap_m)} m to the car`}
+            </span>
+          </div>
+        </div>
+      </div>
+    )
+  }
   if (condition === 'rain') {
     if (!spot.cover_feature && !isPlaceholder('rain_cover')) {
       return (
@@ -250,6 +270,9 @@ function SpotCard({ spot, showConfidence }: { spot: RankedSpot; showConfidence: 
       <div className="facts">
         <span className="facts-src">Legal stopping spot <PlaceholderTag source="legal_spots" /></span>
         <span><IconWalk width={16} height={16} /> {Math.round(spot.spot.walk_distance_m)} m walk · {minutes(spot.spot.walk_distance_m / 1.1)} min</span>
+        {spot.wet_m != null && (
+          <span><IconRain width={16} height={16} /> {spot.wet_m < 1 ? 'Covered the whole way' : `${Math.round(spot.wet_m)} m in the rain`}</span>
+        )}
         {spot.spot.clearance_m != null && (
           <span>{Math.round(spot.spot.clearance_m)} m from the nearest hydrant, crossing or bus stop</span>
         )}

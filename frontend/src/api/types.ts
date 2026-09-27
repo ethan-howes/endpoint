@@ -86,7 +86,10 @@ export interface RankedSpot {
   confidence: Confidence
   reason: string
   // Frontend extensions:
-  walk_polyline?: string // encoded walking route from the rider to the stop point
+  walk_polyline?: string | null // encoded walking route from the rider to the stop point
+  /** Backend (S2 exposure ranking): metres of the walk in the rain / under cover or indoors. */
+  wet_m?: number | null
+  dry_m?: number | null
   accessibility?: AccessibilityInfo
 }
 

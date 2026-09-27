@@ -95,8 +95,11 @@ export function orchestratorApi(baseUrl: string): RideApi {
     const active = plan.final_spot ?? plan.predicted_spot
     let extra: Partial<RankedSpot> = {}
     if (active) {
-      const walk = await fetchRoute('foot', rider, active.spot.stop_point)
-      const path = walk?.path ?? [rider, active.spot.stop_point]
+      // Prefer S2's route: it is the walk the rain exposure was measured along. Fall back to
+      // a browser-routed foot path when S2 didn't send one (gap model, sun, neutral).
+      const path = active.walk_polyline
+        ? decode(active.walk_polyline)
+        : (await fetchRoute('foot', rider, active.spot.stop_point))?.path ?? [rider, active.spot.stop_point]
       extra = {
         walk_polyline: encode(path),
         accessibility: mode === 'accessible' ? placeholderAccessibility(path, true) : undefined,
