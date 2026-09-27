@@ -2,28 +2,39 @@
 
 Zero-shot Mask2Former road/non-road segmentation over video. Off-the-shelf
 inference only, no training. Default preset `mapillary` (swin-large).
+Repo-level facts (venv, git, history) are in the root `AGENTS.md`.
 
 ## Verify before claiming done
 There is no test suite: no pytest, no `tests/`, no linter, no typechecker.
-Verification is `scripts/self_test.py` plus inline assertions.
+Verification is `scripts/self_test.py` plus inline assertions. The interpreter
+lives at the repo root, four levels up:
 
-    .venv/bin/python -m compileall -q roadseg scripts
-    .venv/bin/python scripts/self_test.py          # ~2 min; downloads samples + 2 models
+    /home/yart/projects/endpoint/.venv/bin/python -m compileall -q roadseg scripts
+    /home/yart/projects/endpoint/.venv/bin/python scripts/self_test.py   # ~2 min, needs network
 
-`self_test.py` needs network (Wikimedia, retries on 429). For pure-logic changes
-skip it and assert inline instead:
+`self_test.py` fetches stills from Wikimedia (retries on 429) and loads two
+checkpoints. Both are already in `~/.cache/huggingface/hub` (~2 GB), so a rerun
+is offline-cheap. For pure-logic changes skip it and assert inline instead:
 
-    .venv/bin/python -c "from roadseg.config import resolve_road_ids; print(resolve_road_ids({13:'Road'}, ['road']))"
+    /home/yart/projects/endpoint/.venv/bin/python -c "from roadseg.config import resolve_road_ids; print(resolve_road_ids({13:'Road'}, ['road']))"
+    # -> ((13,), [])
+
+`scripts/run_segmentation.py --list-presets` is free; `--list-classes PRESET`
+loads a model to read the label set.
 
 ## Environment
-- Always `.venv/bin/python` (Python 3.14.4), never system python.
+- Run everything from this directory. The venv has no pip; install with
+  `uv pip install --python /home/yart/projects/endpoint/.venv/bin/python -r requirements.txt`.
 - `requirements.txt` is deliberately unpinned. torch/torchvision must stay
   resolver-paired and transformers 5.x needs `torchvision.transforms.v2`.
   Pinning by hand breaks the install; do not "fix" it.
-- Python 3.14 works only because opencv-python-headless ships `cp37-abi3` wheels
-  (stable ABI, valid despite having no cp314 tag).
+- Verified versions: Python 3.14.4, torch 2.14.0+cu130, torchvision 0.29.0,
+  transformers 5.17.0, numpy 2.5.3, scipy 1.18.1. Python 3.14 works only
+  because opencv-python-headless ships `cp37-abi3` wheels (stable ABI, valid
+  despite having no cp314 tag).
 - GPU is RTX 5060 Ti 16GB (`sm_120`, capability 12.0); fp16 autocast on CUDA is
-  the default path.
+  the default path. `scripts/probe_video.py` prints an ETA from a hardcoded
+  ~8 fps — a rough guess, not a measurement.
 - `scipy` is a hard requirement though nothing imports it directly: transformers
   constructs `Mask2FormerLoss` inside the model constructor, so the check fires
   during pure inference.
@@ -42,6 +53,16 @@ skip it and assert inline instead:
   `from_preset` re-looks-up the name as a PRESETS key and raises `KeyError` for
   any real `org/name`, so `--model org/name` passes CLI validation and then dies
   before the model loads.
+- **Default `-o` is CWD-relative.** With no `--output`, `run_segmentation.py`
+  writes `results/videos/<stem>_road.mp4` relative to the shell's cwd, not to
+  the script. Launching from elsewhere scatters stray `results/` trees (the
+  stale paths inside `results/selftest_report.json` are from exactly that).
+  `self_test.py` is the opposite: its paths are `__file__`-relative.
+- **Nothing here is actually gitignored.** The root `.gitignore` rules are
+  anchored at the repo root while these files live under `src/backend/...`, so
+  `git check-ignore` matches no path: the sample JPEGs, the self-test MP4s, and
+  a 14 MB `selftest_compare.png` are all tracked. Stage source files explicitly;
+  never `git add -A` and never force-add regenerated binaries.
 - **`--smooth` is off by default on purpose.** It is an unmotion-compensated
   pixel EMA, so under a forward-moving camera it lags and smears. It makes the
   overlay calmer while making the mask less true. Never enable it as a fix.
@@ -57,16 +78,15 @@ against a 30fps source. A 60s 30fps clip (1800 frames) takes ~2-3 min. Use
 resolution degrades smoothly.
 
 ## State of validation
-Validated so far on three public dashcam stills plus a synthetic clip built from
-them. No real dashcam video has been run through this; footage is not on the
+`self_test.py` defines five CC-licensed dashcam stills and fetches three by
+default. Coverage is only measured on those stills plus a synthetic clip built
+from them. The committed `results/selftest_report.json` was generated before
+the code moved under `src/`, so its `clip` path is dead; regenerate rather than
+quote it. No real dashcam video has been run through this; footage is not on the
 machine yet. Do not imply real-footage quality is verified.
 
 ## Conventions (carried from this repo's prior CLAUDE.md)
 - Every module documents its input/output contract in a top-of-file docstring;
   keep modules independently testable.
-- After editing a module, smoke-test it on one sample before moving on.
-- Commit to git after that smoke test passes.
-- Commit style: `type: short imperative` (`feat:`, `docs:`, `chore:`, `refactor:`).
-- Outputs (`results/videos/`) and fetched fixtures (`assets/samples/*.jpg`) are
-  gitignored. Do not force-add.
-- Use `wget -c` for large downloads; delete big intermediates after extraction.
+- After editing a module, smoke-test it on one sample before moving on, then
+  commit.
