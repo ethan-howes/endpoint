@@ -98,7 +98,9 @@ class Settings:
     # traffic (US, and the Miami demo area). "left" for right-hand-drive regions.
     traffic_side: str = "right"
 
-    # Service URLs used by the orchestrator (ENDPOINT.md section 8).
+    # Service URLs used by the orchestrator (ENDPOINT.md section 8). Overridable
+    # from the environment -- see the S1_URL/S2_URL/S3_URL handling at the bottom
+    # of this file for why that is not optional.
     s1_url: str = "http://localhost:8001"
     s2_url: str = "http://localhost:8002"
     s3_url: str = "http://localhost:8003"
@@ -507,6 +509,26 @@ if os.getenv("DEMO_TZ"):
     _env_overrides["demo_tz"] = os.getenv("DEMO_TZ", SETTINGS.demo_tz)
 if os.getenv("TRAFFIC_SIDE"):
     _env_overrides["traffic_side"] = os.getenv("TRAFFIC_SIDE", SETTINGS.traffic_side)
+# Service URLs. ENDPOINT.md section 8 and .env.example both document S1_URL,
+# S2_URL and S3_URL, and orchestrator/clients.py::base_url reads them off
+# SETTINGS -- but nothing ever read them from the environment. The dataclass
+# defaults above were the only source, so an S1_URL in .env was silently ignored
+# and the orchestrator dialled localhost:8001 regardless.
+#
+# That is invisible on a laptop, where localhost happens to be the right answer,
+# which is why it survived. It is fatal the moment the services are containers:
+# the orchestrator's network namespace has nothing listening on 8001, every call
+# to S1 and S2 fails, and orchestrator/clients.py -- correctly, per section 4.5 --
+# converts that into a logged fallback rather than an error. The result is a
+# stack that boots clean, passes every healthcheck, and quietly degrades every
+# ride, which is the worst failure mode available: it looks healthy and is wrong.
+#
+# So under docker-compose the orchestrator is given the compose service names,
+# http://s1:8001 and http://s2:8002, and these have to actually be honoured.
+for _var, _field in (("S1_URL", "s1_url"), ("S2_URL", "s2_url"), ("S3_URL", "s3_url")):
+    _value = os.getenv(_var, "").strip()
+    if _value:
+        _env_overrides[_field] = _value
 if _env_overrides:
     SETTINGS = Settings(**_env_overrides)  # type: ignore[arg-type]
 

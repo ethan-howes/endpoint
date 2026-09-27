@@ -35,6 +35,30 @@ rather than doing a live camera check. Everything else in §7 is implemented.
 
 ## Running it
 
+### Docker (one command)
+
+```bash
+docker compose up --build        # or: make up
+```
+
+Four containers, one per process, plus a `make` wrapper for everything else:
+
+```bash
+make up          # build + start + wait for healthchecks + report readiness
+make smoke       # drive a real ride end to end, exits non-zero on failure
+make ready       # per-dependency readiness, and whether the demo data is cached
+make down        # stop, keeping images and the Overpass cache
+make help        # everything else
+```
+
+The app is at **http://localhost:5500** and the API docs at
+**http://localhost:8000/docs**. A fresh clone comes up with no configuration and
+no network: `MOCK=1` is the default, so the committed fixtures are replayed, and
+the Overpass cache is baked into the images and seeded into a named volume on
+first start. `docker/.env.example` documents the knobs.
+
+### Local (no Docker)
+
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
@@ -59,7 +83,7 @@ Interactive API docs at `http://localhost:8000/docs`.
 
 ```bash
 python -m scripts.prefetch_demo_area     # ensure the demo area is cached
-python -m pytest                         # 432 tests, ~1.5s, no network
+python -m pytest                         # 571 tests, ~4s, no network
 python -m scripts.verify_demo_area       # S1 §6 definition of done, independently
 python -m scripts.verify_s2_demo         # S2 scenarios can actually be demonstrated
 python -m scripts.smoke_test             # proves the whole flow
@@ -84,15 +108,20 @@ python -m pytest tests/test_curb.py  # one module
 | `test_geo.py` | local frames, polylines, bearings, cache tiling |
 | `test_legality.py` | one-way rules, exclusion buffers, confidence assignment |
 | `test_curb.py` | candidate generation, per-side offsets, corridor validation |
+| `test_curb_access.py` | which kerb a rider meets at the car door (flush/raised) |
 | `test_ranking.py` | dedupe, walk distance, ordering determinism |
+| `test_s1_legality_fixes.py` | the S1 review fixes: no-stopping roads, exclusion precedence |
+| `test_walk_network.py` | the accessible walking graph: doors, hours, halls, walls, steps |
 | `test_s1_api.py` | the S1 service contract |
 | `test_models.py` | the shared Pydantic contracts |
+| `test_config_env.py` | `shared/config.py` reads the environment; the service URLs the orchestrator dials |
 | `test_clients.py` | the §4.5 guarantee: no service failure breaks a ride |
 | `test_fusion.py` | predictive/vision fusion and the hysteresis rule |
 | `test_orchestrator_api.py` | the full ride flow, including every degraded path |
 | `test_s2_cover.py` | OSM cover/shade parsing, ring closure, node discs |
 | `test_s2_weather.py` | classification, wait-window sampling, the demo override |
 | `test_s2_scoring.py` | the rain/sun scoring factors and ordering |
+| `test_s2_exposure.py` | metres in the rain along the walk, not kerb-to-cover gap |
 | `test_s2_api.py` | the S2 contract, the Overpass query text, both fallbacks |
 | `test_fixture_plan.py` | capture and export derive the same cache ids |
 
@@ -318,13 +347,69 @@ shared/                    contracts, geometry, disk cache, fixtures
 services/s1_legal_spots/   legal stopping spots from OSM
 services/s2_weather_cover/ rain cover and sun shade, ranking S1's spots
 orchestrator/              ride flow, fusion, routing, car simulation
+frontend/                  Vite + React + Leaflet rider app
 scripts/                   prefetch, fixtures, verification, smoke test
 tests/
 data/cache/overpass/       seeded Overpass responses (gitignored)
+
+docker/Dockerfile          one multi-stage file -> s1, s2, orchestrator images
+docker/frontend/           node build -> unprivileged nginx, + nginx.conf
+docker/.env.example        the compose knobs, documented
+docker-compose.yml
+Makefile                   thin wrapper over docker compose
 ```
 
 `shared/` is imported by every service, which is the point: a contract that
 drifts breaks all of them at once, visibly, rather than one quietly.
+
+### Docker notes
+
+Four decisions in the container setup that are not obvious from the files.
+
+**One multi-stage Dockerfile, not four.** The three Python services are `target:`
+stages in `docker/Dockerfile`, and the usual alternative — a published
+`endpoint/base` image the others say `FROM` — does not work here. Compose does not
+order builds by `depends_on` (verified, including with `--with-dependencies`), so
+that approach needs the base built by hand first and fails on a clean clone with
+`pull access denied`. BuildKit's `additional_contexts` is not a way out either: a
+named context is used as a *rootfs* and the Dockerfile inside it is never built,
+so `FROM base` yields an image containing only that Dockerfile and the first
+`RUN` dies on `stat /bin/sh: no such file or directory`. Stages put the
+dependency in the build graph, so `docker compose up --build` works on any
+machine, and the base stage is still built once and cached across all three.
+
+**`S1_URL` / `S2_URL` / `S3_URL` are read from the environment now.** They were
+documented in `ENDPOINT.md` §8 and `.env.example` all along, and
+`orchestrator/clients.py` read them off `SETTINGS` — but nothing ever read them
+*from* the environment, so the dataclass defaults in `shared/config.py` were the
+only source and an `S1_URL` in `.env` was silently ignored. Invisible on a
+laptop, where `localhost` is the right answer. Fatal in a container: the
+orchestrator's network namespace has nothing on 8001, and `clients.py` — correctly,
+per §4.5 — converts each failure into a logged fallback rather than an error, so
+the stack boots clean, passes every healthcheck, and quietly degrades every ride.
+
+**Those three URLs are hardcoded in `docker-compose.yml` and cannot be
+overridden**, unlike every other knob. They are the values that must be right for
+the containers to find each other, and the repo's `.env` sets
+`S1_URL=http://localhost:8001` for host development — which Compose reads for
+variable substitution, so an interpolating version would feed the host's
+localhost into the containers. Everything else takes an `ENDPOINT_*` override for
+the same reason; see `docker/.env.example`.
+
+**The frontend is same-origin, so the image is host-agnostic.** Vite freezes
+`VITE_*` at build time, so baking `http://localhost:8000` would produce an image
+that only works when the browser happens to be on the orchestrator's machine.
+The build arg defaults to the relative `/api` and nginx proxies it to the
+orchestrator, so one image works on localhost, a LAN IP, or a domain name — and
+the browser makes same-origin requests, so the orchestrator's permissive CORS
+middleware is never consulted.
+
+Two things deliberately not containerised: the images drop `rasterio` and
+`anthropic`, which are in `requirements.txt` and imported by nothing (`rasterio`
+was for the Google Solar raster path that was never built, and it drags GDAL in
+with it); and `requirements.txt` itself is left untouched, since it is what the
+local `.venv` was built from. The vision service is absent by design — it is a
+batch Mask2Former pipeline with no HTTP surface, not one of the four processes.
 
 ---
 

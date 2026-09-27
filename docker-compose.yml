@@ -1,0 +1,233 @@
+# Endpoint -- the whole project, one command:
+#
+#     docker compose up --build
+#
+# Four containers, one per process, matching the four in ENDPOINT.md section 8's
+# port table:
+#
+#   s1            :8001   legal stopping spots from OSM          (internal)
+#   s2            :8002   weather, rain cover, sun shade         (internal)
+#   orchestrator  :8000   ride flow, fusion, car simulation      -> published
+#   frontend      :5500   the rider app, static build via nginx  -> published
+#
+# S3/vision is deliberately absent. services/vision is a batch Mask2Former
+# segmentation pipeline with no HTTP surface and services/s3_vision does not
+# exist, so there is no process here to run. The orchestrator reports it as
+# degraded on every approach, which is the pre-existing out-of-scope path.
+#
+# ---------------------------------------------------------------------------
+# Two things in this file that are not obvious
+# ---------------------------------------------------------------------------
+#
+# 1. The three Python services are targets in one multi-stage Dockerfile rather
+#    than four files sharing a published base image. Compose does not order
+#    builds by `depends_on` (verified, including with --with-dependencies), so a
+#    `FROM endpoint/base:latest` chain needs the base built by hand first and
+#    fails on a clean clone with "pull access denied" -- working only on whoever
+#    built it first. `target:` puts the dependency in the build graph, so
+#    `docker compose up --build` works on any machine. The base stage is still
+#    built once and cached across all three targets. See the header of
+#    docker/Dockerfile.
+#
+# 2. S1_URL/S2_URL/S3_URL are hardcoded, not interpolated. Everything else on
+#    this file takes an ${ENDPOINT_*} override. These three do not, on purpose:
+#    they are the values that must be right for the containers to find each
+#    other, and the repo's .env sets S1_URL=http://localhost:8001 for host
+#    development. Interpolating that in would point the orchestrator at itself,
+#    every S1 and S2 call would fail, and orchestrator/clients.py would correctly
+#    and invisibly turn each one into a logged fallback -- a stack that boots
+#    healthy and degrades every ride. See shared/config.py.
+
+name: endpoint
+
+# Shared by the three Python services. The frontend does not join it as a
+# consumer: nginx reaches the orchestrator over it, but nothing reaches nginx.
+x-python-service: &python-service
+  restart: unless-stopped
+  # Real PID 1 for each process, so SIGTERM from `docker compose stop` reaches
+  # uvicorn. Without it PID 1 is the shell-ish exec form, which does not forward
+  # signals, so the orchestrator's lifespan handler never runs and in-flight car
+  # simulators are killed rather than cancelled.
+  init: true
+  networks: [endpoint]
+  environment: &python-env
+    # MOCK=1 replays the committed fixtures in services/*/fixtures/ and never
+    # touches the network. It replaces the HTTP transport and nothing else: the
+    # same parse, geometry and ranking code runs either way, so a mock run is a
+    # real run with a different transport. This is also the only default that
+    # makes a first `up` reliable, because it does not depend on Overpass (which
+    # 504s often) or on the Overpass cache being warm.
+    MOCK: "${ENDPOINT_MOCK:-1}"
+    # ENDPOINT_MOCK=0 for live weather and live Overpass. Then run
+    # `make prefetch` first, and expect S1's 3s budget to be tight on a cold
+    # cache -- see shared/config.py on cache-first.
+    DEMO_BBOX: "${ENDPOINT_DEMO_BBOX:-25.7533,-80.3762,25.7605,-80.3682}"
+    # Measured, not guessed: the Graham Center entrance put the nearest of 30
+    # candidate kerbs 47.2 m from any cover, so rain mode found cover for zero
+    # spots and fell back to walk ranking. See shared/config.py::demo_rider.
+    DEMO_RIDER: "${ENDPOINT_DEMO_RIDER:-25.7584,-80.3725}"
+    DEMO_TZ: "${ENDPOINT_DEMO_TZ:-America/New_York}"
+    TRAFFIC_SIDE: "${ENDPOINT_TRAFFIC_SIDE:-right}"
+  logging: &logging
+    driver: json-file
+    options:
+      # Without this, a long demo day fills the disk: uvicorn and nginx are
+      # chatty and json-file has no size cap by default.
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  # ------------------------------------------------------------------------- #
+  # S1 Legal Spots. ENDPOINT.md section 6.
+  # ------------------------------------------------------------------------- #
+  s1:
+    <<: *python-service
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: s1
+    image: endpoint/s1:1.0.0
+    container_name: endpoint-s1
+    environment:
+      <<: *python-env
+      # Keep the dev diagnostic route (GET /spots/explain) for now. It exposes
+      # OSM source ids, so set ENDPOINT_STRIP_DEV_ROUTES=1 before a demo.
+      STRIP_DEV_ROUTES: "${ENDPOINT_STRIP_DEV_ROUTES:-0}"
+    volumes:
+      # Shared with S2 on purpose. shared/osm_cache.py is one cache for both
+      # services precisely so they do not each pull the same tiles from an
+      # already-flaky public Overpass instance. Two volumes would double the
+      # traffic and halve the hit rate.
+      #
+      # Seeded from the image on first use, so the 94 cached Overpass responses
+      # are already here before anything starts.
+      - overpass-cache:/app/data/cache
+    # Not published. The orchestrator is the only legitimate caller, and a
+    # published port is a public one. Reach it with:
+      #   docker compose exec s1 curl -fsS localhost:8001/health
+    expose: ["8001"]
+    healthcheck:
+      # /health, not /ready. /ready is the honest data check -- it 503s when the
+      # demo area is not cached -- but it needs lat/lng and gating startup on it
+      # would make the orchestrator refuse to boot against a perfectly working
+      # service. Liveness gates startup; /ready is for you to run when you want
+      # to know whether the demo data is there. It is still a real check, and it
+      # is the one that matters before a pitch:
+      #   curl -i "localhost:8001/ready?lat=25.7584&lng=-80.3725"
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+
+  # ------------------------------------------------------------------------- #
+  # S2 Weather and Cover. ENDPOINT.md section 6.
+  # ------------------------------------------------------------------------- #
+  s2:
+    <<: *python-service
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: s2
+    image: endpoint/s2:1.0.0
+    container_name: endpoint-s2
+    volumes:
+      - overpass-cache:/app/data/cache
+    expose: ["8002"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8002/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      # Longer than S1's: pandas and pvlib import on first use, and the image is
+      # a few hundred megabytes of scientific stack to page in from disk on a
+      # cold host. Starting too eagerly reports a failure that is really just a
+      # slow first import.
+      start_period: 25s
+    logging: *logging
+
+  # ------------------------------------------------------------------------- #
+  # Orchestrator. ENDPOINT.md section 7. The API the app talks to.
+  # ------------------------------------------------------------------------- #
+  orchestrator:
+    <<: *python-service
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: orchestrator
+    image: endpoint/orchestrator:1.0.0
+    container_name: endpoint-orchestrator
+    environment:
+      <<: *python-env
+      # Hardcoded on purpose -- see the note at the top of this file. These are
+      # compose service names, resolvable over the `endpoint` network, and they
+      # are the only values that make the four containers able to find each
+      # other. shared/config.py reads all three from the environment now.
+      S1_URL: "http://s1:8001"
+      S2_URL: "http://s2:8002"
+      # Nothing listens on 8003. Kept pointed at the expected address rather
+      # than left blank so orchestrator/clients.py reports "connection refused"
+      # -- an accurate statement about S3 -- instead of a malformed-URL error.
+      S3_URL: "http://s3:8003"
+    ports:
+      # Interactive API docs at http://localhost:8000/docs, and the escape hatch
+      # for driving a ride by hand during a rehearsal.
+      - "${ENDPOINT_ORCHESTRATOR_PORT:-8000}:8000"
+    depends_on:
+      s1:
+        condition: service_healthy
+      s2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    logging: *logging
+
+  # ------------------------------------------------------------------------- #
+  # Frontend. The rider app.
+  # ------------------------------------------------------------------------- #
+  frontend:
+    build:
+      # Repo root, not ./frontend, so the root .dockerignore applies and the
+      # ~110 MB of frontend/node_modules already on disk stays out of the build
+      # context. Same context as the Python services, so there is one .dockerignore
+      # to reason about.
+      context: .
+      dockerfile: docker/frontend/Dockerfile
+      # Relative, so the /api default works unchanged from the host, from a LAN
+      # address, or from behind a domain name. Vite freezes VITE_* at build
+      # time, so an absolute URL would tie the image to one hostname. See the
+      # header of docker/frontend/Dockerfile.
+      args:
+        VITE_API_URL: "/api"
+    image: endpoint/frontend:1.0.0
+    container_name: endpoint-frontend
+    restart: unless-stopped
+    init: true
+    networks: [endpoint]
+    ports:
+      # 5500 is the port from scripts/run_all.sh, so nothing that worked on the
+      # host changes meaning. 8080 inside is the unprivileged nginx default.
+      - "${ENDPOINT_FRONTEND_PORT:-5500}:8080"
+    depends_on:
+      # service_healthy rather than service_started: the first ride the browser
+      # fires would otherwise race the orchestrator's own startup and fail with
+      # a connection refused the UI reports as "can't reach the orchestrator".
+      orchestrator:
+        condition: service_healthy
+    logging: *logging
+
+networks:
+  endpoint:
+    driver: bridge
+
+volumes:
+  # One named volume on the Overpass cache path, shared by S1 and S2. Created
+  # empty on first `up` and then seeded by Docker from the same path in the
+  # base image, which is how a fresh deploy answers from cached data with no
+  # network. `make logs-cache` and `make reset-cache` manage it.
+  overpass-cache:
+    name: endpoint-overpass-cache
