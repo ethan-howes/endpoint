@@ -4,8 +4,8 @@
 Unit tests prove each rule on a hand-built campus. This checks the rules hold on
 the committed FIU data, where they can fail for reasons no fixture anticipates:
 
-1. No link into the network cuts through a building wall (a rider inside a
-   building leaving by its doors is the one exception).
+1. No link into the network cuts through a building wall (a rider leaving the
+   building they are inside, by a door or its nearest side, is the one exception).
 2. No route walks through a home or residence hall.
 3. Walking through buildings actually happens by day and stops at night -- for
    a rider next to the Ernest R. Graham Center, whose doors are mapped.
@@ -77,11 +77,11 @@ def check_routes(net, rider: LatLng, spots, when, problems: list[str]) -> list[w
             continue
         routes.append(r)
         cut = any("cut through" in n for n in r.notes)
-        legs = [(r.points[-2], r.points[-1])]
-        if not inside:
-            legs.append((r.points[0], r.points[1]))
-        for a, b in legs:
-            through = LineString([a, b]).intersection(net.walls).length if net.walls is not None else 0.0
+        # The rider's first leg may cross the wall of the building they are
+        # leaving (its doors, or its nearest side), and no other.
+        legs = [(r.points[-2], r.points[-1], None), (r.points[0], r.points[1], inside[0].shape if inside else None)]
+        for a, b, own in legs:
+            through = walk_network._wall_cut(net, a, b, own)
             if through > WALL_TOLERANCE_M and not cut:
                 problems.append(f"{spot.spot_id}: link cuts {through:.1f} m through a wall")
         for bid in r.through_ids:

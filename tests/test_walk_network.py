@@ -139,6 +139,46 @@ class TestThroughBuildings:
         assert r.points[1] == pytest.approx(at(10, 0))  # straight to the east door
         assert r.length == pytest.approx(10 + 30 + 5, abs=1.0)
 
+    def _one_sided(self, east_door: bool):
+        """The hall's only door is on the west wall unless ``east_door``. The
+        east footway starts 5 m out from the wall, so it is not an inferred door."""
+        east_start = (10, 0) if east_door else (15, 0)
+        ways = [
+            way(1, [(1, -40, 0), (10, -10, 0)]),
+            way(2, [(20, *east_start), (2, 40, 0)]),
+            way(3, [(1, -40, 0), (3, -40, -30), (4, 40, -30), (2, 40, 0)]),
+        ]
+        return build(ways=ways)
+
+    def test_a_rider_can_leave_by_the_nearest_side_when_no_door_is_mapped_there(self):
+        """All the doors on the far side: without this the rider walks round the
+        outside of the building. The exit costs extra and says what it assumed."""
+        net = self._one_sided(east_door=False)
+        assert net.buildings["hall"].doors == [10]
+        r = route(net, start=(8, 0), when=NOON)
+        assert "leaves by the nearest side; no door is mapped there" in r.notes
+        assert r.length < 50  # ~7 m out + 25 m + 5 m, not ~160 m round
+        assert r.penalty == pytest.approx(SETTINGS.nearest_side_exit_penalty_m)
+
+    def test_a_mapped_door_nearby_still_wins(self):
+        r = route(self._one_sided(east_door=True), start=(8, 0), when=NOON)
+        assert not any("nearest side" in n for n in r.notes)
+        assert r.points[1] == pytest.approx(at(10, 0))
+
+    def test_the_nearest_side_exit_does_not_pass_through_another_building(self):
+        net = self._one_sided(east_door=False)
+        other = ShadeBlock(block_id="other", shape=Polygon([at(10.5, -5), at(14, -5), at(14, 5), at(10.5, 5)]),
+                           height_m=5.0, kind="building", building="yes")
+        net = build(blocks=[hall(), other], ways=[
+            way(1, [(1, -40, 0), (10, -10, 0)]),
+            way(2, [(20, 15, 0), (2, 40, 0)]),
+            way(3, [(1, -40, 0), (3, -40, -30), (4, 40, -30), (2, 40, 0)]),
+        ])
+        r = route(net, start=(8, 0), when=NOON)
+        shape = other.shape.buffer(-0.3)
+        for a, b in zip(r.points, r.points[1:]):
+            assert LineString([a, b]).intersection(shape).length == pytest.approx(0.0, abs=0.01)
+
     def test_doors_on_different_floors_are_not_joined(self):
         """No elevator data, so a route never changes floors indoors."""
         ways = [way(1, [(1, -40, 0), (10, -10, 0)]), way(2, [(20, 10, 0), (2, 40, 0)]),

@@ -90,7 +90,8 @@ class Edge(NamedTuple):
     length: float
     dry: float
     penalty: float = 0.0
-    #: "steps" | "raised_crossing" | "unknown_crossing" | "unpaved" | "indoor" | None
+    #: "steps" | "raised_crossing" | "unknown_crossing" | "unpaved" | "indoor"
+    #: | "wall_exit" | None
     flag: str | None = None
     way: int | None = None
     #: ``ShadeBlock.block_id`` of the building an indoor edge runs through.
@@ -124,6 +125,9 @@ class Link(NamedTuple):
     #: The segment snapped to and the fraction along it, for same-segment routes.
     seg: int | None = None
     t: float = 0.0
+    #: Cost of leaving a building by a wall with no mapped door (see
+    #: ``nearest_side_exit_penalty_m``); already included in ``penalty``.
+    exit_penalty: float = 0.0
 
 
 @dataclass
@@ -406,7 +410,20 @@ def build_network(path_map: PathMap, cover_map: CoverMap | None, shade_map: Shad
 # Joining a point to the graph
 # --------------------------------------------------------------------------- #
 
-def _snap_links(net: Network, at: XY, *, allow_walls: bool) -> list[Link]:
+def _wall_cut(net: Network, a: XY, b: XY, ignore=None) -> float:
+    """Metres of the straight line a-b inside building walls, not counting the
+    ``ignore`` shape (the building a rider is leaving by its nearest side)."""
+    if net.walls is None:
+        return 0.0
+    line = LineString([a, b])
+    if ignore is not None:
+        line = line.difference(ignore)
+        if line.is_empty:
+            return 0.0
+    return float(line.intersection(net.walls).length)
+
+
+def _snap_links(net: Network, at: XY, *, allow_walls: bool, ignore=None) -> list[Link]:
     """Links from ``at`` to the ends of the nearest walkable segments.
 
     Each snapped segment yields two links, one per end, each carrying the
@@ -432,7 +449,10 @@ def _snap_links(net: Network, at: XY, *, allow_walls: bool) -> list[Link]:
 
     legs = [(at, (lambda p: (p.x, p.y))(line.interpolate(line.project(pt)))) for _, _, line in chosen]
     leg_dry = _overlap_lengths(legs, net.dry)
-    leg_wall = _overlap_lengths(legs, net.walls) if not allow_walls else np.zeros(len(legs))
+    leg_wall = (
+        np.zeros(len(legs)) if allow_walls
+        else [_wall_cut(net, a, b, ignore) for a, b in legs]
+    )
 
     links: list[Link] = []
     for (d, i, line), (_, via), ldry, lwall in zip(chosen, legs, leg_dry, leg_wall):
@@ -458,7 +478,7 @@ def _nearest_nodes(net: Network, at: XY, k: int, radius: float) -> list[int]:
     return [int(net.ids[i]) for i in order if d[i] <= radius]
 
 
-def _open_links(net: Network, at: XY) -> list[Link]:
+def _open_links(net: Network, at: XY, ignore=None) -> list[Link]:
     """Straight walks across open ground to nearby nodes.
 
     The line is trimmed half a metre at each end before testing, so a link that
@@ -472,7 +492,7 @@ def _open_links(net: Network, at: XY) -> list[Link]:
             out.append(Link(n, 0.0, 0.0))
             continue
         line = LineString([at, b])
-        if net.walls is not None and line.intersection(net.walls).length > _WALL_TOLERANCE_M:
+        if _wall_cut(net, at, b, ignore) > _WALL_TOLERANCE_M:
             continue
         inner = shapely.ops.substring(line, 0.5, length - 0.5) if length > 1.0 else None
         if inner is not None and net.barriers is not None and net.barriers.intersects(inner):
@@ -486,23 +506,44 @@ def _open_links(net: Network, at: XY) -> list[Link]:
     return out
 
 
+def _exit_links(net: Network, at: XY, building: Building) -> list[Link]:
+    """Leaving ``building`` by its nearest side, as if through an unmapped door.
+
+    The same snap and open-ground links any outdoor point gets, except that
+    crossing this one building's wall is allowed (every other wall still is
+    not) and each link carries ``nearest_side_exit_penalty_m``. The indoor part
+    of the walk is dry, since the building is in the dry geometry.
+    """
+    cost = SETTINGS.nearest_side_exit_penalty_m
+    raw = (_snap_links(net, at, allow_walls=False, ignore=building.shape)
+           + _open_links(net, at, ignore=building.shape))
+    return [
+        lk._replace(penalty=lk.penalty + cost, flag="wall_exit", exit_penalty=cost)
+        for lk in raw
+    ]
+
+
 def _links(net: Network, at: XY, *, rider: bool) -> tuple[list[Link], str | None]:
     """How a point joins the graph, and a note when it had to bend the rules.
 
-    A rider inside a building joins at that building's doors, whatever the time
-    and whatever the building: they are leaving it, not passing through. Every
-    other point snaps onto the nearest walkable segments without crossing a wall.
-    If that leaves nothing -- a point hemmed in by walls, or inside a building
-    with no doors found -- the wall rule is waived and the note says so.
+    A rider inside a building leaves it -- whatever the time and whatever the
+    building, since they are leaving, not passing through -- by its doors or by
+    its nearest side at a cost (``_exit_links``). Door data is one-sided often
+    enough that doors alone sent riders the long way round; the cost keeps a
+    mapped door the answer whenever it is reasonably close. Every other point
+    snaps onto the nearest walkable segments without crossing a wall. If that
+    leaves nothing, the wall rule is waived and the note says so.
     """
     inside = net.buildings_containing(at) if rider else []
-    for b in inside:
-        if b.doors:
-            out = []
-            for dnode in b.doors:
-                p = net.xy[net.index[dnode]]
-                length = math.hypot(p[0] - at[0], p[1] - at[1])
-                out.append(Link(dnode, length, length))  # indoors: dry
+    if inside:
+        b = inside[0]
+        out = []
+        for dnode in b.doors:
+            p = net.xy[net.index[dnode]]
+            length = math.hypot(p[0] - at[0], p[1] - at[1])
+            out.append(Link(dnode, length, length))  # indoors: dry
+        out += _exit_links(net, at, b)
+        if out:
             return out, None
 
     links = _snap_links(net, at, allow_walls=False) + _open_links(net, at)
@@ -511,9 +552,7 @@ def _links(net: Network, at: XY, *, rider: bool) -> tuple[list[Link], str | None
     links = _snap_links(net, at, allow_walls=True)
     if not links:
         return [], None
-    note = ("starts inside a building with no mapped doors; the route may cut through its walls"
-            if inside else "the route may cut through a building")
-    return links, note
+    return links, "the route may cut through a building"
 
 
 # --------------------------------------------------------------------------- #
@@ -600,8 +639,9 @@ def _same_segment(net: Network, s: Search, stop_links: list[Link]) -> tuple[floa
         seg = net.segs[sl.seg]
         share = abs(rl.t - sl.t)
         r_leg = math.hypot(rl.via[0] - s.rider_xy[0], rl.via[1] - s.rider_xy[1])
-        edge = Edge(-3, r_leg + share * seg.length, share * seg.dry, share * seg.penalty,
-                    seg.flag if share > 0 else None, seg.way)
+        edge = Edge(-3, r_leg + share * seg.length, share * seg.dry,
+                    share * seg.penalty + rl.exit_penalty,
+                    "wall_exit" if rl.exit_penalty else (seg.flag if share > 0 else None), seg.way)
         cost = _cost(s.mode, edge.length, edge.dry, edge.penalty)
         if best is None or cost < best[0]:
             best = (cost, [edge], [s.rider_xy, rl.via, sl.via])
@@ -669,6 +709,8 @@ def route_to(net: Network, s: Search, stop_xy: XY) -> Route | None:
         notes.append(
             f"{len(unknown)} crossing{'s' if len(unknown) > 1 else ''} with no mapped curb ramp"
         )
+    if any(e.flag == "wall_exit" for e in edges):
+        notes.append("leaves by the nearest side; no door is mapped there")
     if any(e.flag == "unpaved" for e in edges):
         notes.append("part of the route is unpaved")
     for extra in (s.note, link_note):

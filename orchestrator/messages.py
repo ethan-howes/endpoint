@@ -119,6 +119,9 @@ def _access(spot: RankedSpot) -> str:
     through = [n[len("through "):] for n in spot.route_notes if n.startswith("through ")]
     if through:
         parts.append(f"Your route goes through {' and '.join(through)} while it's open.")
+    if any(n.startswith("leaves by the nearest side") for n in spot.route_notes):
+        parts.append("Leave the building on the side nearest the car; "
+                     "its doors there aren't on our map.")
     if "route includes steps" in spot.route_notes:
         parts.append("The walk includes steps.")
     if "crosses a road at a raised curb" in spot.route_notes:

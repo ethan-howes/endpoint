@@ -870,6 +870,12 @@ class TestAccessMessages:
         assert "couldn't confirm a curb ramp" in msg
         assert "no curb ramp" not in msg.lower()
 
+    def test_a_nearest_side_exit_is_explained(self, client, stub):
+        msg = self._plan(client, stub, {},
+                         ["leaves by the nearest side; no door is mapped there"])["rider_message"]
+        assert "side nearest the car" in msg
+        assert "aren't on our map" in msg
+
     def test_steps_are_mentioned(self, client, stub):
         msg = self._plan(client, stub, {}, ["route includes steps"])["rider_message"]
         assert "includes steps" in msg

@@ -246,6 +246,14 @@ class Settings:
     #: has lakes and fences no map layer here knows about.
     open_ground_radius_m: float = 40.0
 
+    #: A rider inside a building may leave by its nearest wall, as if through a
+    #: door nobody mapped, at this cost. Mapped doors therefore still win unless
+    #: their route is more than this much longer. Needed because door data is
+    #: one-sided: all 12 doors found on the Ernest R. Graham Center are on its
+    #: west and south walls, so a rider on the east side was routed ~280 m for a
+    #: kerb ~45 m away.
+    nearest_side_exit_penalty_m: float = 40.0
+
     #: Door-to-door through a building is the straight line times this: corridors
     #: do not run wall to wall. The same 1.3 S1 uses for streets.
     indoor_detour_factor: float = 1.3
