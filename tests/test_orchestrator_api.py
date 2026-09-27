@@ -89,6 +89,9 @@ class Stub:
         self.s1_ok = True
         self.s2_ok = True
         self.s3_ok = False          # S3 is out of scope in this build
+        #: WalkRoute objects S2's /walk/routes returns (none by default, so the
+        #: orchestrator keeps S1's nearest unless a test says otherwise).
+        self.walk_routes: list = []
         #: Raw assessment dicts S3 returns when ``s3_ok`` is set.
         self.assessments: list[dict] = []
         self.conditions: ConditionsResult | None = None
@@ -125,6 +128,11 @@ class Stub:
             resp = LegalSpotsResponse(
                 spots=list(self.spots), count=len(self.spots), source="osm", cached=True
             )
+        elif service == "S2" and path == "/walk/routes":
+            if not self.s2_ok:
+                return ServiceResult(ok=False, reason="S2 unreachable (ConnectError)")
+            from shared.models import WalkRoutesResponse
+            resp = WalkRoutesResponse(routes=list(self.walk_routes))
         elif service == "S2":
             if not self.s2_ok:
                 return ServiceResult(ok=False, reason="S2 unreachable (ConnectError)")
@@ -304,13 +312,37 @@ class TestAnswerWithoutMobilityNeeds:
         assert plan["predicted_spot"]["spot"]["spot_id"] == "s1_0001"
         assert plan["final_spot"]["spot"]["spot_id"] == "s1_0001"
 
-    def test_never_calls_s2(self, client, stub):
+    def test_never_asks_s2_about_conditions(self, client, stub):
         """Not a saving -- a correctness point. §3 step 4: without mobility needs
         this is just a pickup, so telling the rider about weather they did not
-        ask about is noise, and an S2 outage must not be able to affect it."""
+        ask about is noise. S2 is asked for walking routes only."""
         rid = _request(client)
         client.post(f"/rides/{rid}/answer", json={"mobility_needs": False})
-        assert not stub.called("S2")
+        assert ("S2", "/conditions/rank") not in stub.calls
+        assert ("S2", "/walk/routes") in stub.calls
+
+    def test_nearest_is_by_the_real_walk(self, client, stub):
+        """S1's nearest by straight line can be the longer walk round a building;
+        the ride picks the spot the rider reaches soonest, and carries its route."""
+        from shared.models import WalkRoute
+
+        stub.walk_routes = [
+            WalkRoute(spot_id="s1_0001", walk_m=280.0, walk_polyline="a"),
+            WalkRoute(spot_id="s1_0002", walk_m=60.0, walk_polyline="b"),
+        ]
+        rid = _request(client)
+        plan = client.post(f"/rides/{rid}/answer", json={"mobility_needs": False}).json()
+        assert plan["predicted_spot"]["spot"]["spot_id"] == "s1_0002"
+        assert plan["predicted_spot"]["spot"]["walk_distance_m"] == 60.0
+        assert plan["predicted_spot"]["walk_polyline"] == "b"
+        assert plan["phase"] == "confirmed"
+
+    def test_an_s2_outage_keeps_s1s_nearest(self, client, stub):
+        stub.s2_ok = False
+        rid = _request(client)
+        plan = client.post(f"/rides/{rid}/answer", json={"mobility_needs": False}).json()
+        assert plan["predicted_spot"]["spot"]["spot_id"] == "s1_0001"
+        assert plan["phase"] == "confirmed"
 
     def test_message_is_a_plain_pickup_instruction(self, client, stub):
         rid = _request(client)

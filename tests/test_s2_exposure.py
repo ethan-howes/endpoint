@@ -251,3 +251,51 @@ class TestServiceSelection:
         result = await service.rank(self._request())
         assert result.ranked[0].wet_m is None
         assert any("no walking network" in f for f in result.fallbacks_used)
+
+
+class TestWalkRoutes:
+    """``POST /walk/routes``: routes only, for rides with no comfort features."""
+
+    @pytest.fixture(autouse=True)
+    def _stubs(self, monkeypatch, campus):
+        path_map, cover_map, shade_map, spots = campus
+        self.spots = spots
+        service.clear_caches()
+
+        async def covers(tile, radius, fallbacks, frame):
+            return cover_map
+
+        async def shade(tile, radius, fallbacks, frame):
+            return shade_map
+
+        async def paths(tile, radius, fallbacks, frame):
+            return path_map
+
+        monkeypatch.setattr(service, "_fetch_covers", covers)
+        monkeypatch.setattr(service, "_fetch_shade", shade)
+        monkeypatch.setattr(service, "_fetch_paths", paths)
+        self.monkeypatch = monkeypatch
+        yield
+        service.clear_caches()
+
+    @pytest.mark.anyio
+    async def test_returns_a_real_route_per_reachable_spot(self):
+        from shared.models import WalkRoutesRequest
+
+        res = await service.walk_routes(WalkRoutesRequest(rider_location=ll(0, 0), spots=self.spots))
+        by_id = {r.spot_id: r for r in res.routes}
+        assert set(by_id) == {"A", "B"}
+        assert by_id["A"].walk_m == pytest.approx(54.0, abs=1.5)
+        assert by_id["A"].walk_polyline
+
+    @pytest.mark.anyio
+    async def test_no_network_is_an_empty_answer_with_a_note(self):
+        from shared.models import WalkRoutesRequest
+
+        async def none(tile, radius, fallbacks, frame):
+            return None
+
+        self.monkeypatch.setattr(service, "_fetch_paths", none)
+        res = await service.walk_routes(WalkRoutesRequest(rider_location=ll(0, 0), spots=self.spots))
+        assert res.routes == []
+        assert any("no walking network" in f for f in res.fallbacks_used)

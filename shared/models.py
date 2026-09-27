@@ -418,6 +418,34 @@ class RankRequest(StrictModel):
     force_time: datetime | None = None
 
 
+class WalkRoutesRequest(StrictModel):
+    """``POST /walk/routes``: real walking routes, nothing else.
+
+    For rides that asked for no comfort features. The orchestrator uses it to
+    pick the nearest spot by the walk the rider will actually make, rather than
+    S1's straight-line estimate, and to hand the UI that route. ``pickup_time``
+    matters only for building hours.
+    """
+
+    rider_location: LatLng
+    spots: list[Spot] = Field(default_factory=list)
+    pickup_time: datetime | None = None
+
+
+class WalkRoute(BaseModel):
+    spot_id: str
+    walk_m: float
+    walk_polyline: str
+    indoor_m: float = 0.0
+    route_notes: list[str] = Field(default_factory=list)
+
+
+class WalkRoutesResponse(BaseModel):
+    #: One per spot the network could reach; unreachable spots are omitted.
+    routes: list[WalkRoute] = Field(default_factory=list)
+    fallbacks_used: list[str] = Field(default_factory=list)
+
+
 class Overlays(BaseModel):
     cover_features: list[CoverFeature] = Field(default_factory=list)
     shade_geojson: dict | None = None

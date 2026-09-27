@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, Query
 
-from shared.models import Condition, RankRequest
+from shared.models import Condition, RankRequest, WalkRoutesRequest, WalkRoutesResponse
 
 from . import service, weather
 
@@ -66,6 +66,13 @@ async def rank(req: RankRequest):
         result.mode.value, len(result.ranked), len(result.fallbacks_used),
     )
     return result
+
+
+@app.post("/walk/routes", response_model=WalkRoutesResponse)
+async def walk_routes(req: WalkRoutesRequest) -> WalkRoutesResponse:
+    """Accessible walking routes only: no weather, no ranking. For rides that
+    asked for no comfort features, so their walk is real rather than estimated."""
+    return await service.walk_routes(req)
 
 
 @app.get("/conditions/weather")

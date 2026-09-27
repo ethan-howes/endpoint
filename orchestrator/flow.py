@@ -33,6 +33,8 @@ from shared.models import (
     RankedSpot,
     RidePhase,
     Spot,
+    WalkRoutesRequest,
+    WalkRoutesResponse,
     utcnow,
 )
 from shared.osm_cache import USER_AGENT  # noqa: F401  (keeps one UA for the project)
@@ -116,6 +118,30 @@ async def fetch_conditions(
     return result.data
 
 
+async def _nearest_by_walk(ride: Ride, spots: list[Spot], fallback: Spot, pickup_time) -> RankedSpot:
+    """The spot with the shortest real walk, with its route, or ``fallback``."""
+    result = await call_service(
+        "S2", "POST", "/walk/routes",
+        json_body=WalkRoutesRequest(
+            rider_location=ride.rider_location, spots=spots, pickup_time=pickup_time,
+        ).model_dump(mode="json"),
+        model=WalkRoutesResponse,
+    )
+    merge_fallbacks(ride.fallbacks_used, result)
+    routes = result.data.routes if result.ok and isinstance(result.data, WalkRoutesResponse) else []
+    by_id = {s.spot_id: s for s in spots}
+    routes = [r for r in routes if r.spot_id in by_id]
+    if not routes:
+        return as_ranked(fallback, "Fastest pickup", score=1.0)
+    best = min(routes, key=lambda r: (r.walk_m, r.spot_id))
+    spot = by_id[best.spot_id].model_copy(update={"walk_distance_m": best.walk_m})
+    return RankedSpot(
+        spot=spot, score=1.0, reason="Fastest pickup", confidence=spot.confidence,
+        wait_point=spot.stop_point, walk_polyline=best.walk_polyline,
+        indoor_m=best.indoor_m, route_notes=list(best.route_notes),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Predictive phase
 # --------------------------------------------------------------------------- #
@@ -174,11 +200,15 @@ async def plan_ride(
     pickup_time = utcnow() + timedelta(seconds=route.eta_s)
 
     if not mobility_needs:
-        # §3 step 4: no mobility needs means nearest spot, and S2 is not called
-        # at all. Skipping the call is not just a saving: it is the difference
-        # between telling the rider their car is 20 m away and telling them
-        # something about weather they did not ask about.
-        ride.predicted_spot = as_ranked(nearest, "Fastest pickup", score=1.0)
+        # §3 step 4: no mobility needs means the nearest spot, and no weather or
+        # cover ranking -- the rider did not ask about either. "Nearest" is by
+        # the walk they will actually make: S2's walking routes, not S1's
+        # straight-line x 1.3, which ignores buildings and fences and let the UI
+        # draw a public router's 280 m detour for a 134 m walk. If S2 cannot
+        # route, S1's nearest stands.
+        ride.predicted_spot = await _nearest_by_walk(ride, spots, nearest, pickup_time)
+        if ride.predicted_spot.spot.spot_id != nearest.spot_id:
+            await _dispatch(ride, ride.predicted_spot)
         ride.candidates = [ride.predicted_spot]
         ride.final_spot = ride.predicted_spot
         ride.phase = RidePhase.CONFIRMED

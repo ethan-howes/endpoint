@@ -41,6 +41,9 @@ from shared.models import (
     RankRequest,
     ShadeSource,
     Spot,
+    WalkRoute,
+    WalkRoutesRequest,
+    WalkRoutesResponse,
 )
 from shared.osm_cache import OverpassError, read_cache
 
@@ -729,6 +732,46 @@ async def rank(req: RankRequest) -> ConditionsResult:
         overlays=overlays,
         fallbacks_used=fallbacks,
     )
+
+
+async def walk_routes(req: WalkRoutesRequest) -> WalkRoutesResponse:
+    """Accessible walking routes from the rider to each spot, with no ranking.
+
+    Never raises: a missing network is an empty answer plus a fallback note, and
+    the caller keeps S1's estimates.
+    """
+    fallbacks: list[str] = []
+    if not req.spots:
+        return WalkRoutesResponse()
+    when = req.pickup_time or datetime.now(timezone.utc)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    rank_like = RankRequest(rider_location=req.rider_location, spots=req.spots, pickup_time=when)
+    radius = search_radius_m(rank_like)
+    frame = frame_for(req.rider_location.lat, req.rider_location.lng)
+    try:
+        bundle = await _walk_network(_tiles_covering(rank_like, radius), radius, fallbacks, frame)
+        if bundle is None:
+            fallbacks.append("no walking network; walk distances are S1 estimates")
+            return WalkRoutesResponse(fallbacks_used=fallbacks)
+        net = bundle[0]
+        routes = _routes(net, rank_like, frame, walk_network.closed_buildings(net, _local(when)))
+    except Exception as exc:  # noqa: BLE001
+        log.exception("walk routes failed")
+        fallbacks.append(f"walking network error: {type(exc).__name__}")
+        return WalkRoutesResponse(fallbacks_used=fallbacks)
+
+    out = [
+        WalkRoute(
+            spot_id=sid,
+            walk_m=round(r.length, 1),
+            walk_polyline=polyline.encode([frame.to_ll(x, y) for x, y in r.points], precision=5),
+            indoor_m=round(r.indoor_m, 1),
+            route_notes=list(r.notes),
+        )
+        for sid, r in routes.items() if r is not None
+    ]
+    return WalkRoutesResponse(routes=out, fallbacks_used=fallbacks)
 
 
 def cache_state(lat: float | None = None, lng: float | None = None) -> dict[str, Any]:
