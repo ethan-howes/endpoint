@@ -16,7 +16,20 @@ export type Stage =
 
 export interface DemoSettings {
   forceCondition: Condition | null // sent as force_condition; null = real weather
+  sunTime: SunTime // sent as force_time when forcing sun, so shade works at any hour
   alwaysAsk: boolean
+}
+
+export type SunTime = 'now' | 'morning' | 'afternoon'
+
+/**
+ * force_time for the sun demo. On campus (UTC-4 in EDT), 14:00Z is 10 AM and 20:00Z is 4 PM:
+ * shadows fall on opposite sides of the street (see .env.example in the repo root).
+ */
+function sunForceTime(sunTime: SunTime): string | null {
+  if (sunTime === 'now') return null
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date())
+  return `${today}T${sunTime === 'morning' ? '14' : '20'}:00:00Z`
 }
 
 const POLL_MS = 1000 // ENDPOINT.md §7: the UI polls GET /rides/{id} every second
@@ -36,7 +49,7 @@ function savePref(value: PickupMode) {
 }
 
 export function useRide() {
-  const [settings, setSettings] = useState<DemoSettings>({ forceCondition: 'rain', alwaysAsk: true })
+  const [settings, setSettings] = useState<DemoSettings>({ forceCondition: 'rain', sunTime: 'afternoon', alwaysAsk: true })
   const [stage, setStage] = useState<Stage>('home')
   const [destination, setDestination] = useState<Place | null>(null)
   const [pickupMode, setPickupModeState] = useState<PickupMode | null>(loadPref)
@@ -47,6 +60,7 @@ export function useRide() {
   const [ride, setRide] = useState<RideState | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [feedback, setFeedback] = useState<'up' | 'down' | null>(null)
+  const [updating, setUpdating] = useState(false)
 
   // Bumped whenever the flow restarts so late responses from an abandoned ride are ignored.
   const seq = useRef(0)
@@ -61,14 +75,27 @@ export function useRide() {
     savePref(v)
   }, [])
 
+  // Latest re-plan wins: switching options or weather quickly must not let a slow, older answer
+  // overwrite a newer one (S2 can take several seconds, especially for sun/shade).
+  const planToken = useRef(0)
   const runPlan = useCallback((id: string, mode: PickupMode) => {
+    const token = ++planToken.current
+    setUpdating(true)
     setStage((s) => (s === 'confirm' ? s : 'planning'))
-    const body = { mobility_needs: mode !== 'standard', pickup_mode: mode, force_condition: mode === 'weather' ? settings.forceCondition : null }
+    const needs = mode !== 'standard'
+    const body = {
+      mobility_needs: needs,
+      pickup_mode: mode,
+      force_condition: needs ? settings.forceCondition : null,
+      force_time: needs && settings.forceCondition === 'sun' ? sunForceTime(settings.sunTime) : null,
+    }
     guard(api.answer(id, body), (p) => {
+      if (token !== planToken.current) return
+      setUpdating(false)
       setPlan(p)
       setStage(p.needs_rider_confirmation ? 'detour' : 'confirm')
     })
-  }, [guard, settings.forceCondition])
+  }, [guard, settings.forceCondition, settings.sunTime])
 
   // ---- flow actions -------------------------------------------------------
 
@@ -105,7 +132,8 @@ export function useRide() {
   const confirmPickup = useCallback(() => {
     if (!rideId) return
     setStage('dispatching')
-    guard(api.dispatch(rideId), (r) => { setRide(r); setStage('enroute') })
+    // The adapter may hand back a different ride to poll (see api/orchestrator.ts).
+    guard(api.dispatch(rideId), (r) => { setRideId(r.ride_id); setRide(r); setStage('enroute') })
   }, [guard, rideId])
 
   const startTrip = useCallback(() => {
@@ -120,6 +148,7 @@ export function useRide() {
 
   const reset = useCallback(() => {
     seq.current++
+    setUpdating(false)
     setStage('home')
     setDestination(null)
     setRideId(null)
@@ -139,12 +168,14 @@ export function useRide() {
   }, [stage])
 
   // Re-plan when the demo weather override changes while the rider is still choosing.
-  const lastForce = useRef(settings.forceCondition)
+  const forceKey = `${settings.forceCondition}|${settings.sunTime}`
+  const lastForce = useRef(forceKey)
   useEffect(() => {
-    if (lastForce.current === settings.forceCondition) return
-    lastForce.current = settings.forceCondition
-    if (stage === 'confirm' && rideId && pickupMode === 'weather') runPlan(rideId, pickupMode)
-  }, [settings.forceCondition, stage, rideId, pickupMode, runPlan])
+    if (lastForce.current === forceKey) return
+    lastForce.current = forceKey
+    // Weather only changes the plan for pickups with mobility needs (accessible and weather).
+    if (stage === 'confirm' && rideId && pickupMode && pickupMode !== 'standard') runPlan(rideId, pickupMode)
+  }, [forceKey, stage, rideId, pickupMode, runPlan])
 
   // Poll the ride while the car is moving.
   useEffect(() => {
@@ -174,7 +205,10 @@ export function useRide() {
   return {
     settings, setSettings,
     weatherCondition,
-    stage, destination, pickupMode, spots, question, plan: current, ride, activeSpot, route, walk, error, feedback,
+    updating: updating && !error,
+    // The orchestrator returns legal spots with the plan (as candidates), not with the request.
+    spots: spots.length ? spots : (current?.candidates ?? []).map((c) => c.spot),
+    stage, destination, pickupMode, question, plan: current, ride, activeSpot, route, walk, error, feedback,
     rider: RIDER_LOCATION,
     openSearch, chooseDestination, choosePickupMode, answerDetour, confirmPickup, startTrip, skipToArrival,
     reset, back, setPickupMode, setFeedback,

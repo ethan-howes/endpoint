@@ -7,8 +7,8 @@
 
 import { writeFile } from 'node:fs/promises'
 
-const RIDER = [25.75655, -80.37285]
-const CAR_START = [25.76255, -80.36845]
+const RIDER = [25.7584, -80.3725]
+const CAR_START = [25.7625, -80.385]
 const SPOTS = {
   gc_loading: [25.75648, -80.37224],
   gc_service: [25.75592, -80.37249],

@@ -2,10 +2,10 @@ import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { useEffect, useRef } from 'react'
 import { CircleMarker, GeoJSON, MapContainer, Marker, Polygon, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet'
-import { SHADEMAP_KEY } from '../api/dataSources'
+import { SHADEMAP_KEY, isPlaceholder } from '../api/dataSources'
 import { DEFAULT_ZOOM, MAP_CENTER } from '../api/fixtures'
 import type { CoverFeature, LatLng } from '../api/types'
-import { distanceAlong, pathFromDistance, pathLengthM, pointAlong } from '../lib/geo'
+import { distanceAlong, pathFromDistance, pathLengthM, pointAlong, utmToLatLng, utmZoneOf } from '../lib/geo'
 import type { Ride } from '../useRide'
 import { PlaceholderTag } from './Placeholder'
 import { WeatherOverlay } from './WeatherOverlay'
@@ -18,15 +18,38 @@ const destIcon = L.divIcon({ className: '', html: '<div class="m-dest"></div>', 
 const rampIcon = L.divIcon({ className: '', html: '<div class="m-ramp" title="Curb ramp"></div>', iconSize: [18, 18], iconAnchor: [9, 9] })
 const carIcon = L.divIcon({ className: '', html: '<div class="m-car"><div class="m-car-body"></div></div>', iconSize: [24, 36], iconAnchor: [12, 18] })
 
-/** Parses the WKT polygons S2 sends in overlays.cover_features. WKT order is "lng lat". */
-function wktPolygon(wkt: string): [number, number][] | null {
-  const m = /POLYGON\s*\(\((.+?)\)\)/i.exec(wkt)
-  if (!m) return null
-  return m[1].split(',').map((pair) => {
-    const [lng, lat] = pair.trim().split(/\s+/).map(Number)
-    return [lat, lng]
-  })
+type Shape = { kind: 'polygon' | 'line'; points: [number, number][] } | { kind: 'point'; points: [number, number][] }
+
+/**
+ * Parses the WKT S2 sends for cover features (POINT, LINESTRING, POLYGON and their MULTI forms).
+ * Coordinates are "x y": lng/lat per ENDPOINT.md, but S2 currently sends UTM meters, which are
+ * detected (|x| > 180) and converted using the zone around `near`. Polygon holes are ignored.
+ */
+function wktShapes(wkt: string, near: LatLng): Shape[] {
+  const type = /^\s*(\w+)/.exec(wkt)?.[1]?.toUpperCase() ?? ''
+  const zone = utmZoneOf(near)
+  const coords = (text: string): [number, number][] =>
+    text.split(',').map((pair) => {
+      const [x, y] = pair.trim().split(/\s+/).map(Number)
+      if (Math.abs(x) > 180 || Math.abs(y) > 90) {
+        const p = utmToLatLng(x, y, zone, near.lat >= 0)
+        return [p.lat, p.lng] as [number, number]
+      }
+      return [y, x] as [number, number]
+    }).filter(([lat, lng]) => Number.isFinite(lat) && Number.isFinite(lng))
+  // Innermost parenthesised coordinate lists, e.g. "(x y, x y)".
+  const groups = [...wkt.matchAll(/\(([^()]+)\)/g)].map((m) => coords(m[1]))
+  if (type.includes('POLYGON')) {
+    // First ring of each polygon: for MULTIPOLYGON, rings that start a "((" group.
+    const outer = type === 'POLYGON' ? groups.slice(0, 1) : [...wkt.matchAll(/\(\(([^()]+)\)/g)].map((m) => coords(m[1]))
+    return outer.filter((g) => g.length > 2).map((points) => ({ kind: 'polygon', points }))
+  }
+  if (type.includes('LINESTRING')) return groups.filter((g) => g.length > 1).map((points) => ({ kind: 'line', points }))
+  if (type.includes('POINT')) return groups.flat().map((pt) => ({ kind: 'point', points: [pt] }))
+  return []
 }
+
+const COVER_STYLE = { color: '#0a8f7c', fillColor: '#0fb9a0', fillOpacity: 0.4, weight: 1.5 }
 
 /** Fits the map to whatever the current stage is about, leaving room for the demo panel. */
 function Framer({ points, insetRight, follow }: { points: LatLng[]; insetRight: number; follow: boolean }) {
@@ -143,7 +166,11 @@ export function MapView({ ride, insetRight }: { ride: Ride; insetRight: number }
   const choosing = stage === 'comfort' || stage === 'planning' || stage === 'detour' || stage === 'confirm'
   const beforePickup = choosing || stage === 'dispatching' || stage === 'enroute' || stage === 'arrived'
   const driving = stage === 'enroute' || stage === 'ontrip'
-  const coverFeatures: CoverFeature[] = plan?.overlays?.cover_features ?? []
+  // S2 overlays when the orchestrator passes them through; otherwise the cover attached to each ranked spot.
+  const coverFeatures: CoverFeature[] = plan?.overlays?.cover_features?.length
+    ? plan.overlays.cover_features
+    : [...new Map((plan?.candidates ?? []).flatMap((c) => (c.cover_feature ? [[c.cover_feature.feature_id, c.cover_feature] as const] : []))).values()]
+  const degraded = ride.ride?.degraded_note ?? null
   const condition = ride.weatherCondition
   const shadeGeojson = plan?.overlays?.shade_geojson
   const shadeMissing = condition === 'sun' && !shadeGeojson && !SHADEMAP_KEY
@@ -187,11 +214,16 @@ export function MapView({ ride, insetRight }: { ride: Ride; insetRight: number }
         {/* Shade from the sun (S2 shade polygons / sun shadow layer). */}
         {condition === 'sun' && <ShadeLayer geojson={shadeGeojson} />}
 
-        {/* Rain cover: mapped awnings, canopies and shelters from S2 (overlays.cover_features). */}
-        {beforePickup && coverFeatures.map((f) => {
-          const poly = wktPolygon(f.geometry_wkt)
-          return poly ? <Polygon key={f.feature_id} positions={poly} pathOptions={{ color: '#0a8f7c', fillColor: '#0fb9a0', fillOpacity: 0.4, weight: 1.5 }} /> : null
-        })}
+        {/* Cover from S2: awnings, canopies, covered walkways, shelters, building passages. */}
+        {beforePickup && coverFeatures.flatMap((f) =>
+          wktShapes(f.geometry_wkt, rider).map((shape, i) => {
+            const k = `${f.feature_id}_${i}`
+            const tip = <Tooltip>{f.kind.replace(/_/g, ' ')} · {f.confidence}</Tooltip>
+            if (shape.kind === 'polygon') return <Polygon key={k} positions={shape.points} pathOptions={COVER_STYLE}>{tip}</Polygon>
+            if (shape.kind === 'line') return <Polyline key={k} positions={shape.points} pathOptions={{ color: '#0fb9a0', weight: 7, opacity: 0.75, lineCap: 'round' }}>{tip}</Polyline>
+            return <CircleMarker key={k} center={shape.points[0]} radius={7} pathOptions={COVER_STYLE}>{tip}</CircleMarker>
+          }),
+        )}
 
         {routeToDraw.length > 1 && (
           <>
@@ -203,7 +235,10 @@ export function MapView({ ride, insetRight }: { ride: Ride; insetRight: number }
         {/* S1 legal spots */}
         {beforePickup && stage !== 'arrived' && spots.map((s) => (
           <CircleMarker key={s.spot_id} center={ll(s.stop_point)} radius={5} pathOptions={{ color: '#fff', weight: 1.5, fillColor: '#8b929c', fillOpacity: 1 }}>
-            <Tooltip>{s.street_name} · {s.side} side</Tooltip>
+            <Tooltip>
+              {s.street_name ?? 'Unnamed road'}
+              {s.clearance_m != null ? ` · ${Math.round(s.clearance_m)} m from the nearest no-stopping zone` : ''}
+            </Tooltip>
           </CircleMarker>
         ))}
 
@@ -230,16 +265,21 @@ export function MapView({ ride, insetRight }: { ride: Ride; insetRight: number }
 
       <WeatherOverlay condition={condition} />
 
-      {condition && condition !== 'neutral' && (
+      {((condition && condition !== 'neutral') || degraded) && (
         <div className="map-chips">
-          <span className={`map-chip map-chip--${condition}`}>
-            {condition === 'rain' ? 'Raining at pickup' : 'Strong sun at pickup'}
-            <PlaceholderTag source="weather" />
-          </span>
-          {condition === 'rain' && !coverFeatures.length && (
-            <span className="map-chip">Rain cover layer <PlaceholderTag source="rain_cover" /></span>
+          {condition && condition !== 'neutral' && (
+            <span className={`map-chip map-chip--${condition}`}>
+              {condition === 'rain' ? 'Raining at pickup' : 'Strong sun at pickup'}
+              <PlaceholderTag source="weather" />
+            </span>
+          )}
+          {condition === 'rain' && beforePickup && plan?.mobility_needs && !coverFeatures.length && (
+            isPlaceholder('rain_cover')
+              ? <span className="map-chip">Rain cover layer <PlaceholderTag source="rain_cover" /></span>
+              : <span className="map-chip">No mapped cover near these spots</span>
           )}
           {shadeMissing && <span className="map-chip">Shade layer <PlaceholderTag source="sun_shade" /></span>}
+          {degraded && <span className="map-chip map-chip--warn">{degraded}</span>}
         </div>
       )}
 

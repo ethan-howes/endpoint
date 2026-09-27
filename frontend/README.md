@@ -1,9 +1,24 @@
 # Endpoint rider app (frontend)
 
-A barebones web app with a Waymo / Uber / Lyft style ride flow, set on **FIU's Modesto A. Maidique Campus** in Miami.
-The backend services aren't built yet, so the app runs on **placeholder data** that has the same shape as the orchestrator's responses (ENDPOINT.md §5 and §7). The computer vision step (S3) runs behind the scenes in the flow but isn't displayed in the app.
+A Waymo / Uber / Lyft style rider app on **FIU's Modesto A. Maidique Campus**, connected to the orchestrator on `:8000`. The orchestrator supplies the real-time data:
+- legal spots (S1)
+- weather and cover/shade ranking (S2)
+- the car's route and simulated position
+
+Where the orchestrator's flow doesn't cover something the app needs, the frontend fills it in (see [Gaps the frontend fills](#gaps-the-frontend-fills)). The computer vision step (S3) isn't shown in the app.
 
 ## Run
+
+Backend first, from the repo root (see the root README):
+
+```bash
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+MOCK=1 ./scripts/run_all.sh        # or run the three uvicorn commands from the root README
+curl localhost:8000/ready          # S1 and S2 should be "ok"
+```
+
+Then the app:
 
 ```bash
 cd frontend
@@ -12,92 +27,98 @@ npm run dev        # http://localhost:5500
 npm run build      # type-check + production build into dist/
 ```
 
-The map uses OpenStreetMap tiles, so it needs internet. Nothing else calls the network while placeholder mode is on.
+The app talks to `http://localhost:8000` by default. Settings in `frontend/.env` (see `.env.example`):
 
-## Pickup options
-
-After picking a destination, the rider chooses how they want to be picked up:
-
-| Option | What it shows | Demo spot |
+| Variable | Default | Meaning |
 |---|---|---|
-| **Accessible pickup** | Step-free sidewalk route drawn in green along real footpaths, curb-ramp markers, and a checklist (steps, slope, cross slope, surface, width) | GC service drive |
-| **Weather-conscious pickup** | Weather at pickup (S2), cover at the spot, and the walk | East Campus Circle (south) |
-| Standard pickup | Fastest pickup | East Campus Circle (north) |
+| `VITE_API_URL` | `http://localhost:8000` | Orchestrator URL |
+| `VITE_USE_PLACEHOLDER` | `0` | `1` = run without a backend, on in-browser placeholder data |
+| `VITE_SHADEMAP_KEY` | empty | Reserved for a sun shadow map layer (not wired yet) |
 
-The option is sent as `pickup_mode` on `POST /rides/{id}/answer` (a frontend extension). It can be switched on the confirm screen and set as a preference on the home screen. The sidewalk details are placeholders (`AccessibilityInfo` in `src/api/types.ts`) until a sidewalk/accessibility service exists; see ENDPOINT.md §12.
+If the orchestrator isn't reachable, the app says so and tells you how to start it.
 
-## Weather on the map
+Things that need internet:
+- the map tiles (OpenStreetMap);
+- the rider's walking route and the destination leg (public OSRM servers, fetched in the browser; both fall back to straight lines if unreachable).
 
-When it's raining at pickup (the plan's weather, or the demo control set to **Rain**), the map shows an animated rain layer and a "Raining at pickup" chip. Strong sun gets a warm glow and a "Strong sun at pickup" chip. See `src/components/WeatherOverlay.tsx`.
+## Ride flow
 
-## Data still to come (placeholders)
+1. **Where to?** Saved places (placeholder Home and Work) and nearby destinations.
+2. **How should we pick you up?**
+   - **Accessible pickup:** step-free sidewalk route, curb ramps, a level spot to board.
+   - **Weather-conscious pickup:** under cover when it rains, in shade when it's hot.
+   - **Standard:** the fastest pickup.
+3. **Confirm pickup spot.** Shows the orchestrator's chosen spot and reason, its clearance from hydrants, crossings and bus stops, the weather, the cover on the map, the walking route and the rider message. The rider can switch options here.
+4. **Detour prompt**, only when S2 asks for one (`confirmation_question`).
+5. **Car on the way.** The app polls `GET /rides/{id}` every second, and the car glides along the real route between polls.
+6. **Your car is here → Unlock → On trip → Arrived**, then a feedback prompt.
 
-Every data source is listed in [src/api/dataSources.ts](src/api/dataSources.ts) with `status: 'placeholder'`. Anything built on placeholder data gets a dashed **PLACEHOLDER** tag or box in the UI. Flip a source to `'live'` once its service is wired in, and the tags disappear. The demo panel's **Data sources** list shows the current status of each.
+The rider stands at the backend's `DEMO_RIDER` (25.7584, -80.3725, near Green Library). Its curbs are about 6 m from cover, so rain mode has real cover to rank.
 
-| Data | Service | Arrives in | UI slot |
-|---|---|---|---|
-| Actual weather | S2 `weather.py` (Open-Meteo) | `RidePlan.weather` | Weather card, map weather chip, rain/sun overlay |
-| Rain cover | S2 `rain_cover.py` | `RankedSpot.cover_feature`, `overlays.cover_features` | "Rain cover at your spot" card, cover polygons on the map |
-| Shade from the sun | S2 `sun_shade.py` + a sun shadow layer (ShadeMap) | `overlays.shade_geojson` | "Shade at pickup time" card, `ShadeLayer` in `MapView.tsx` (renders GeoJSON; ShadeMap key via `VITE_SHADEMAP_KEY`) |
-| Legal parking spots | S1 Legal Spots | `RideRequestResponse.spots`, `candidates[].spot` | Gray dots, "Legal stopping spot" line on the spot card |
-| Sidewalk accessibility | Accessibility service (not assigned yet) | `RankedSpot.accessibility`, `walk_polyline` | Step-free checklist, green sidewalk route, curb-ramp markers |
-| Routes | Orchestrator routing adapter | `route_polyline`, `walk_polyline` | Route line, walking path |
+## How the app maps onto the orchestrator
 
-## Real FIU routes
+| App action | Orchestrator call |
+|---|---|
+| Choose an option | `POST /rides/request`, then `POST /rides/{id}/answer` with `{mobility_needs, force_condition, force_time}`, then `GET /rides/{id}` (for the detour question and degraded notes) |
+| Accessible or Weather-conscious | `mobility_needs: true` |
+| Standard | `mobility_needs: false` |
+| Detour answer | `POST /rides/{id}/confirm` |
+| Car position | `GET /rides/{id}` every second |
+| Skip to arrival | `POST /rides/{id}/skip_to_arrival` |
 
-The pickup spots are snapped to real drivable roads near the Graham Center. The driving routes (car → pickup, pickup → each destination) and walking routes (rider → pickup) follow real roads and footpaths. They were fetched once from OSRM and saved in `src/api/routes.generated.json`, so the demo doesn't call a routing service live. To regenerate after changing spots or destinations:
+The adapter is [src/api/orchestrator.ts](src/api/orchestrator.ts). The app only ever calls the `RideApi` interface in [src/api/client.ts](src/api/client.ts).
+
+The orchestrator rejects unknown request fields, so the pickup option (`pickup_mode`), the walking route and the sidewalk data are kept on the client and never sent.
+
+## Gaps the frontend fills
+
+Each of these is handled in `src/api/orchestrator.ts` and can be removed once the backend covers it.
+
+| Gap in the orchestrator | What the frontend does |
+|---|---|
+| `/answer` starts the car right away; there's no separate dispatch | Option previews are throwaway rides; **Confirm pickup** starts a fresh ride with the same answer |
+| Answering the same ride twice corrupts the car's travelled distance | Switching options previews on a fresh ride |
+| Rides without mobility needs are confirmed but the car is never simulated | The car is driven locally along the orchestrator's route, at the orchestrator's 5× speed-up |
+| `skip_to_arrival` stops the simulator ~135 m out and never restarts it | The last stretch is driven locally |
+| No trip to the destination | Routed with OSRM in the browser and driven locally |
+| Cover geometry (`geometry_wkt`) is in UTM meters, not lng/lat | Converted back to lat/lng before drawing |
+| S3 is out of scope, so every approach reports "S3 unreachable" | S3-only degraded notes are hidden; other notes are shown as a banner |
+
+## Asks for the backend
+
+1. **Sun mode is too slow.** With real candidates, S2's sun/shade ranking takes more than the orchestrator's 6 s S2 timeout, so every sun ride falls back to "Weather service unavailable; using the nearest spot". Rain takes about 2 s. S2 also keeps computing after the timeout, which delays the next request.
+2. **Separate dispatch from `/answer`**, e.g. `POST /rides/{id}/dispatch`. The `flow.start_simulation` docstring already anticipates this.
+3. **Simulate the car for rides without mobility needs**, and restart the simulator after `skip_to_arrival`.
+4. **A trip leg:** `POST /rides/{id}/start_trip {destination}` plus a trip status on `GET /rides/{id}`.
+5. **Pass S2 `overlays` through on `RidePlan`**, meaning `cover_features` and `shade_geojson`, so the map can draw all nearby cover and shade.
+6. **`geometry_wkt` in lng/lat**, as ENDPOINT.md §5 implies.
+7. **The rider message says "camera confirmed the predicted spot" even when S3 was unreachable.**
+8. **Optional:** accept `pickup_mode`, and provide the walking route and sidewalk accessibility data (steps, curb ramps, slope) for the accessible option.
+
+## Placeholders still in the UI
+
+Each data source is listed in [src/api/dataSources.ts](src/api/dataSources.ts). Data that isn't real yet gets a dashed **PLACEHOLDER** tag or box. With the backend connected, legal spots, weather, rain cover and routing are live and their tags disappear.
+
+| Still a placeholder | Why | UI slot |
+|---|---|---|
+| Shade from the sun | The orchestrator doesn't pass S2's `shade_geojson` through | "Shade at pickup time" card, `ShadeLayer` in `MapView.tsx` |
+| Sidewalk accessibility | No service yet | Step-free checklist, curb-ramp markers |
+| Vehicle, plate, fare, support | Out of scope | `PLACEHOLDER` in `RidePanel.tsx` |
+| Feedback answer | Not sent anywhere yet | Complete screen |
+
+## Demo controls (press ` to toggle)
+
+- **Weather at pickup:** sends `force_condition` (Live = no override). Changing it on the confirm screen re-plans the ride. The map shows animated rain when the plan's weather is rain.
+- **Sun time:** shown when Sun is selected. Sends `force_time` (10 AM = 14:00Z, 4 PM = 20:00Z on campus) so shade works at any hour.
+- **Ask the pickup question every ride.**
+- **Skip to arrival.**
+- **Restart.**
+- **Data sources:** which sources are live and which are placeholders.
+
+## Placeholder mode
+
+`VITE_USE_PLACEHOLDER=1` runs the whole flow in the browser without a backend ([src/api/placeholder.ts](src/api/placeholder.ts), [src/api/fixtures.ts](src/api/fixtures.ts)). Its routes were fetched once from OSRM and saved in `src/api/routes.generated.json`. To regenerate them after changing spots or destinations:
 
 ```bash
 node scripts/build-routes.mjs
 ```
-
-## Connecting the real backend
-
-Everything goes through [src/api/client.ts](src/api/client.ts). Create `frontend/.env`:
-
-```
-VITE_USE_PLACEHOLDER=0
-VITE_API_URL=http://localhost:8000
-```
-
-The `RideApi` interface lists every call the UI makes. Three of them aren't in ENDPOINT.md yet and need the orchestrator to add them (or the UI to be adjusted):
-
-| Call | Why the UI needs it |
-|---|---|
-| `POST /rides/{id}/dispatch` | The rider confirms the pickup spot before the car leaves |
-| `POST /rides/{id}/start_trip` | The rider is in the car; drive to the destination |
-| `trip_status` on `GET /rides/{id}` | Tells the UI when the car is at the pickup and when the trip is done |
-
-`RideRequestResponse.spots`, so legal spots can be drawn before the rider answers, and `RidePlan.overlays` / `needs_rider_confirmation` are optional extra fields. The UI reads them if they're present.
-
-## Ride flow
-
-1. **Where to?** Saved places (placeholder Home / Work) and nearby destinations.
-2. **Finding your pickup.** Calls `requestRide`; legal spots from S1 show as gray dots.
-3. **How should we pick you up?** Accessible, weather-conscious, or standard. The choice is remembered.
-4. **Confirm pickup spot.** Calls `answer`. Shows the chosen spot, the walking route, and the option's details (sidewalk checklist or weather). The rider can switch options here.
-5. **Detour prompt**, only if the plan sets `needs_rider_confirmation`.
-6. **Car on the way.** Calls `dispatch`, then polls `getRide` every second. The car marker glides between polls.
-7. **Your car is here → Unlock → On trip → Arrived**, with a feedback prompt.
-
-## Placeholders
-
-| What | Where | Replaced by |
-|---|---|---|
-| Rider location, car start, destinations | `src/api/fixtures.ts` | Device location + a places/geocoding search |
-| Legal spots around the Graham Center | `src/api/fixtures.ts` | S1 via the orchestrator |
-| Ranking, weather, rider messages | `src/api/fixtures.ts` | S2 via the orchestrator |
-| Routes (precomputed from OSRM) | `src/api/routes.generated.json` | Orchestrator routing adapter |
-| Sidewalk accessibility (steps, ramps, slope) | `placeholderAccessibility` in `src/api/fixtures.ts` | Accessibility / sidewalk service |
-| Car movement, phases | `src/api/placeholder.ts` | `GET /rides/{id}` |
-| Vehicle, plate, fare, support | `PLACEHOLDER` in `src/components/RidePanel.tsx` | Not in scope yet |
-| Feedback answer | `Complete` screen | Not sent anywhere yet |
-
-Spot positions come from real road snapping, but their names and rankings are placeholders.
-
-## Demo controls (press ` to toggle)
-
-- **Weather at pickup:** sends `force_condition` (Live = no override). Changing it on the confirm screen re-plans the ride.
-- **Ask the pickup question every ride.**
-- **Skip to arrival:** `POST /rides/{id}/skip_to_arrival`.
-- **Restart.**

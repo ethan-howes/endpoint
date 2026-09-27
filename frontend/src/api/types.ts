@@ -1,4 +1,4 @@
-// Data contracts from ENDPOINT.md §5 (src/backend/shared/models.py).
+// Data contracts from ENDPOINT.md §5, as built in shared/models.py on the backend.
 // The orchestrator is the source of truth; keep these in sync with it.
 
 export interface LatLng {
@@ -22,26 +22,33 @@ export type PickupMode = 'accessible' | 'weather' | 'standard'
 export interface Spot {
   spot_id: string
   stop_point: LatLng
-  street_name: string
-  side: string
+  street_name: string | null
+  /** Backend: 'left' | 'right' relative to the OSM way (null for fallback spots). Placeholder data uses compass words. */
+  side: string | null
   curb_bearing_deg: number
   spot_type: 'curb' | 'loading_zone' | 'parking_lot' | 'driveway_pullout'
   walk_distance_m: number
   source: string
   confidence: Confidence
   notes: string[]
+  // Backend additions:
+  segment_id?: string | null
+  /** Distance to the nearest exclusion buffer (hydrant, crossing, bus stop...). */
+  clearance_m?: number | null
+  legality_basis?: 'official_regulation' | 'tagged_permissive' | 'inferred_standard' | 'unknown'
 }
 
 /** S2 Weather and Cover, module 1 */
 export interface WeatherReport {
   condition: Condition
   precip_mm_h: number
-  cloud_cover_pct: number
-  uv_index?: number
-  direct_radiation_w_m2?: number
-  apparent_temperature_c?: number
+  cloud_cover_pct: number | null
+  uv_index?: number | null
+  direct_radiation_w_m2?: number | null
+  apparent_temperature_c?: number | null
+  temperature_c?: number | null
   is_day: boolean
-  weather_code: number
+  weather_code: number | null
   valid_at: string
   source: string
   overridden: boolean
@@ -72,7 +79,7 @@ export interface AccessibilityInfo {
 
 export interface RankedSpot {
   spot: Spot
-  wait_point: LatLng
+  wait_point: LatLng | null
   cover_feature: CoverFeature | null
   gap_m: number | null
   score: number
@@ -104,6 +111,7 @@ export interface RidePlan {
   // Fields the frontend reads if the orchestrator adds them (not yet in ENDPOINT.md):
   pickup_mode?: PickupMode
   needs_rider_confirmation?: boolean
+  degraded_note?: string | null
   overlays?: Overlays
 }
 
@@ -115,6 +123,19 @@ export interface RideState extends RidePlan {
   car_heading_deg?: number
   // Frontend extension (not yet in ENDPOINT.md): where the trip is after pickup.
   trip_status: TripStatus
+  /** Backend: set when a service degraded; shown as a banner. */
+  degraded_note?: string | null
+}
+
+/** GET /rides/{ride_id} as the orchestrator actually returns it (orchestrator/main.py RideStatus). */
+export interface RideStatus {
+  plan: RidePlan
+  car_position: LatLng
+  phase: Phase
+  remaining_m: number
+  remaining_eta_s: number
+  confirmation_question: string | null
+  degraded_note: string | null
 }
 
 export interface RideRequestResponse {
@@ -127,7 +148,7 @@ export interface RideRequestResponse {
 
 export interface AnswerBody {
   mobility_needs: boolean
-  pickup_mode?: PickupMode // frontend extension
+  pickup_mode?: PickupMode // frontend-only: never sent (the orchestrator rejects unknown fields)
   force_condition?: Condition | null
   force_time?: string | null
 }

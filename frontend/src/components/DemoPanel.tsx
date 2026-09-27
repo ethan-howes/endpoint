@@ -60,6 +60,25 @@ export function DemoPanel({ ride, open, setOpen }: { ride: Ride; open: boolean; 
         </div>
       </div>
 
+      {settings.forceCondition === 'sun' && (
+        <div className="demo-field">
+          <span className="demo-label">Sun time (force_time): shade flips sides of the street</span>
+          <div className="seg" role="radiogroup" aria-label="Sun time">
+            {([['now', 'Now'], ['morning', '10 AM'], ['afternoon', '4 PM']] as const).map(([value, label]) => (
+              <button
+                key={value}
+                role="radio"
+                aria-checked={settings.sunTime === value}
+                className={settings.sunTime === value ? 'on' : ''}
+                onClick={() => setSettings((s) => ({ ...s, sunTime: value }))}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <label className="demo-check">
         <input type="checkbox" checked={settings.alwaysAsk} onChange={(e) => setSettings((s) => ({ ...s, alwaysAsk: e.target.checked }))} />
         Ask the pickup question every ride

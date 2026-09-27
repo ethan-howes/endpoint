@@ -6,6 +6,7 @@ import {
   IconAccessible, IconAlert, IconBack, IconBolt, IconCheck, IconClock, IconCloud, IconHome, IconPin, IconRain, IconRamp,
   IconSearch, IconShield, IconSun, IconThumb, IconUmbrella, IconUnlock, IconWalk, IconWork,
 } from './Icons'
+import { isPlaceholder } from '../api/dataSources'
 import { PlaceholderBox, PlaceholderTag } from './Placeholder'
 
 // Things no service provides yet. Shown as-is so it's obvious they're stand-ins.
@@ -37,6 +38,17 @@ function ConfidenceBadge({ c }: { c: Confidence }) {
 
 /** Weather at pickup from S2. */
 function WeatherCard({ weather }: { weather: WeatherReport | null }) {
+  if (!weather && !isPlaceholder('weather')) {
+    return (
+      <div className="weather">
+        <IconCloud />
+        <div className="grow">
+          <strong>Weather unavailable right now</strong>
+          <span>The weather service didn't answer in time, so this is the nearest spot.</span>
+        </div>
+      </div>
+    )
+  }
   if (!weather || (weather.source === 'placeholder' && !weather.overridden)) {
     return (
       <PlaceholderBox source="weather" title="Weather at pickup">
@@ -47,10 +59,12 @@ function WeatherCard({ weather }: { weather: WeatherReport | null }) {
   const { condition } = weather
   const Icon = condition === 'rain' ? IconRain : condition === 'sun' ? IconSun : IconCloud
   const label = condition === 'rain' ? 'Rain' : condition === 'sun' ? 'Strong sun' : 'No rain or strong sun'
+  // A forced (demo) condition carries no forecast numbers, only a reason; fall back to it.
   const detail =
-    condition === 'rain' ? `${weather.precip_mm_h} mm/h at pickup`
-    : condition === 'sun' ? `UV ${weather.uv_index ?? '—'} · feels like ${weather.apparent_temperature_c ?? '—'}°C`
-    : `${weather.cloud_cover_pct}% cloud cover`
+    condition === 'rain' && weather.precip_mm_h > 0 ? `${weather.precip_mm_h} mm/h at pickup`
+    : condition === 'sun' && weather.uv_index != null ? `UV ${Math.round(weather.uv_index)}${weather.apparent_temperature_c != null ? ` · feels like ${Math.round(weather.apparent_temperature_c)}°C` : ''}`
+    : condition === 'neutral' && weather.cloud_cover_pct != null ? `${weather.cloud_cover_pct}% cloud cover`
+    : weather.reason || 'At pickup time'
   return (
     <div className={`weather weather--${condition}`}>
       <Icon />
@@ -200,8 +214,12 @@ function Loading({ title, sub, onBack }: { title: string; sub: string; onBack?: 
   )
 }
 
+const COMPASS = ['north', 'south', 'east', 'west']
+
 function spotTitle(r: RankedSpot) {
-  return `${r.spot.street_name} · ${r.spot.side} side`
+  const street = r.spot.street_name ?? 'Unnamed campus road'
+  // The backend's side is left/right of the OSM way, which means nothing to a rider; only show compass sides.
+  return r.spot.side && COMPASS.includes(r.spot.side) ? `${street} · ${r.spot.side} side` : street
 }
 
 function SpotCard({ spot, showConfidence }: { spot: RankedSpot; showConfidence: boolean }) {
@@ -217,7 +235,10 @@ function SpotCard({ spot, showConfidence }: { spot: RankedSpot; showConfidence: 
       </div>
       <div className="facts">
         <span className="facts-src">Legal stopping spot <PlaceholderTag source="legal_spots" /></span>
-        <span><IconWalk width={16} height={16} /> {spot.spot.walk_distance_m} m walk · {minutes(spot.spot.walk_distance_m / 1.1)} min</span>
+        <span><IconWalk width={16} height={16} /> {Math.round(spot.spot.walk_distance_m)} m walk · {minutes(spot.spot.walk_distance_m / 1.1)} min</span>
+        {spot.spot.clearance_m != null && (
+          <span>{Math.round(spot.spot.clearance_m)} m from the nearest hydrant, crossing or bus stop</span>
+        )}
         {spot.cover_feature && <span><IconUmbrella width={16} height={16} /> {capitalize(spot.cover_feature.kind.replace('_', ' '))}</span>}
       </div>
     </div>
@@ -303,7 +324,7 @@ function PickupOptions({ ride }: { ride: Ride }) {
   return (
     <>
       <Header title="" onBack={ride.back} />
-      <p className="eyebrow">{ride.spots.length} pickup spots near you</p>
+      {ride.spots.length > 0 && <p className="eyebrow">{ride.spots.length} pickup spots near you</p>}
       <h2 className="question">How should we pick you up?</h2>
       <div className="stack">
         {main.map((m) => (
@@ -342,6 +363,9 @@ function Confirm({ ride }: { ride: Ride }) {
     <>
       <Header title="Confirm pickup spot" onBack={ride.back} />
       <ModeSwitch ride={ride} />
+      {ride.updating && (
+        <div className="updating" role="status"><span className="spinner" aria-hidden /> Updating your pickup for the new conditions…</div>
+      )}
       <WeatherHint ride={ride} />
       {plan.pickup_mode === 'weather' && <WeatherCard weather={plan.weather} />}
       <SpotCard spot={activeSpot} showConfidence={plan.pickup_mode !== 'standard'} />
@@ -357,7 +381,7 @@ function Confirm({ ride }: { ride: Ride }) {
         </div>
         <strong>{PLACEHOLDER.fare}</strong>
       </div>
-      <button className="btn btn--primary" onClick={ride.confirmPickup}>Confirm pickup</button>
+      <button className="btn btn--primary" onClick={ride.confirmPickup} disabled={ride.updating}>Confirm pickup</button>
     </>
   )
 }
@@ -365,8 +389,10 @@ function Confirm({ ride }: { ride: Ride }) {
 function EnRoute({ ride }: { ride: Ride }) {
   const { ride: state, activeSpot } = ride
   if (!state || !activeSpot) return null
+  // Standard pickups are confirmed up front, so phase alone can't say how close the car is.
+  const near = state.eta_s <= 60
   const status =
-    state.phase === 'approaching' ? 'Almost there' : state.phase === 'confirmed' ? 'Arriving now' : 'Your car is on the way'
+    state.phase === 'approaching' ? 'Checking your spot' : near ? 'Arriving now' : 'Your car is on the way'
   return (
     <>
       <div className="status">
@@ -485,6 +511,9 @@ export function RidePanel({ ride }: { ride: Ride }) {
     <aside className="panel" aria-label="Ride">
       <div className="panel-grip" aria-hidden />
       <div className="panel-body" key={ride.stage}>
+        {(ride.ride ?? ride.plan)?.degraded_note && !ride.error && (
+          <div className="hint hint--warn" role="status">{(ride.ride ?? ride.plan)?.degraded_note}</div>
+        )}
         {ride.error && (
           <div className="error" role="alert">
             <strong>Something went wrong</strong>

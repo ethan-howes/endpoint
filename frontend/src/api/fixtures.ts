@@ -13,12 +13,15 @@ import type { AccessibilityInfo, Condition, LatLng, PickupMode, Place, RankedSpo
 export const MAP_CENTER: LatLng = { lat: 25.7574, lng: -80.3733 }
 export const DEFAULT_ZOOM = 17
 
-/** Rider starts outside the Graham Center (student union). */
-export const RIDER_LOCATION: LatLng = { lat: 25.75655, lng: -80.37285 }
-export const RIDER_ADDRESS = 'Graham Center, FIU'
+/**
+ * The backend's DEMO_RIDER (shared/config.py): near Green Library, picked because its best
+ * curbs sit ~6 m from overhead cover, so rain mode has something real to rank.
+ */
+export const RIDER_LOCATION: LatLng = { lat: 25.7584, lng: -80.3725 }
+export const RIDER_ADDRESS = 'Near Green Library, FIU'
 
-/** Where the robotaxi is idling when a ride is requested: near SW 8th St and SW 107th Ave. */
-export const CAR_START: LatLng = { lat: 25.76255, lng: -80.36845 }
+/** The backend's demo_car_start (shared/config.py); used by placeholder mode. */
+export const CAR_START: LatLng = { lat: 25.7625, lng: -80.385 }
 
 export const PLACES: Place[] = [
   { id: 'home', name: 'Home', address: 'Placeholder: set a home address', kind: 'home', location: { lat: 25.7631, lng: -80.3835 } },
@@ -75,7 +78,7 @@ export const spotKey = (spot: Spot) => spot.spot_id.replace(/^s1_/, '')
 // ---- ranking (placeholder for S2 + accessibility service) -----------------
 
 /** Placeholder sidewalk data: curb ramps at the end of the walk and partway along it. */
-function placeholderAccessibility(walk: LatLng[], stepFree: boolean): AccessibilityInfo {
+export function placeholderAccessibility(walk: LatLng[], stepFree: boolean): AccessibilityInfo {
   const total = pathLengthM(walk)
   return {
     step_free: stepFree,

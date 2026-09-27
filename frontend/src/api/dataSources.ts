@@ -3,6 +3,9 @@
 
 export type SourceStatus = 'placeholder' | 'live'
 
+/** Sources the orchestrator on dev already serves are live whenever the app talks to it. */
+const BACKEND: SourceStatus = import.meta.env.VITE_USE_PLACEHOLDER === '1' ? 'placeholder' : 'live'
+
 export interface DataSource {
   label: string
   service: string // who provides it (ENDPOINT.md §6 names)
@@ -14,24 +17,24 @@ const SOURCES = {
   legal_spots: {
     label: 'Legal parking spots',
     service: 'S1 Legal Spots (OSM / Overpass)',
-    status: 'placeholder',
+    status: BACKEND,
     field: 'RideRequestResponse.spots, RidePlan.candidates[].spot',
   },
   weather: {
     label: 'Actual weather',
     service: 'S2 weather.py (Open-Meteo)',
-    status: 'placeholder',
+    status: BACKEND,
     field: 'RidePlan.weather',
   },
   rain_cover: {
     label: 'Rain cover',
     service: 'S2 rain_cover.py (OSM awnings, canopies, shelters)',
-    status: 'placeholder',
+    status: BACKEND,
     field: 'RankedSpot.cover_feature, RidePlan.overlays.cover_features',
   },
   sun_shade: {
     label: 'Shade from the sun',
-    service: 'S2 sun_shade.py (Google Solar API + pvlib) and a sun shadow map layer (ShadeMap)',
+    service: 'S2 sun_shade.py ranks by shade already; the orchestrator does not pass S2 overlays through yet (and a ShadeMap layer is optional)',
     status: 'placeholder',
     field: 'RidePlan.overlays.shade_geojson',
   },
@@ -43,8 +46,8 @@ const SOURCES = {
   },
   routing: {
     label: 'Driving and walking routes',
-    service: 'Orchestrator routing adapter (precomputed OSRM routes for now)',
-    status: 'placeholder',
+    service: 'Orchestrator routing adapter (OSRM); walk and destination legs routed in the browser',
+    status: BACKEND,
     field: 'RidePlan.route_polyline, RankedSpot.walk_polyline',
   },
 } satisfies Record<string, DataSource>

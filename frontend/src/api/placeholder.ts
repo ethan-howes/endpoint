@@ -1,8 +1,9 @@
 // PLACEHOLDER orchestrator that runs in the browser. It returns fixture data shaped like the real
 // contracts so the UI can be built now. Delete this file once the orchestrator is live.
 
-import { pathLengthM, pointAlong } from '../lib/geo'
+import { pathLengthM } from '../lib/geo'
 import type { RideApi } from './client'
+import { LocalDriver } from './localDriver'
 import { CAR_START, PLACEHOLDER_SPOTS, driveRoute, encode, placeholderRanking, placeholderWeather, spotKey } from './fixtures'
 import type { AnswerBody, LatLng, PickupMode, RidePlan, RideState } from './types'
 
@@ -14,8 +15,7 @@ const VISION_PLACEHOLDER_MS = 2000 // S3 Vision would run here; the UI doesn't s
 interface Stored {
   plan: RidePlan
   path: LatLng[]
-  movingSince: number | null // ms timestamp when the car started along `path`
-  offsetM: number // meters already covered before movingSince (for skip-to-arrival)
+  driver: LocalDriver | null // null until the car is dispatched
   approachAt: number | null
   trip: 'to_pickup' | 'to_destination'
 }
@@ -24,13 +24,11 @@ const rides = new Map<string, Stored>()
 const delay = <T>(value: T, ms = 350) => new Promise<T>((r) => setTimeout(() => r(value), ms))
 
 function snapshot(s: Stored): RideState {
-  const total = pathLengthM(s.path)
-  const moved = s.movingSince === null ? 0 : s.offsetM + ((Date.now() - s.movingSince) / 1000) * (s.trip === 'to_pickup' ? PICKUP_SPEED_MPS : Math.max(TRIP_SPEED_MPS, total / 12))
-  const along = Math.min(total, moved)
-  const { position, heading } = pointAlong(s.path, along)
-  const remaining = total - along
+  const driver = s.driver ?? new LocalDriver(s.path, 0)
+  const { position, heading } = driver.snapshot()
+  const remaining = driver.remainingM
 
-  if (s.trip === 'to_pickup' && s.movingSince !== null) {
+  if (s.trip === 'to_pickup' && s.driver) {
     if (s.plan.phase === 'predicted' && remaining < APPROACH_M) {
       s.plan.phase = 'approaching'
       s.approachAt = Date.now()
@@ -50,7 +48,7 @@ function snapshot(s: Stored): RideState {
 
   return {
     ...s.plan,
-    eta_s: Math.round(remaining / 11), // shown as if driving at ~25 mph
+    eta_s: driver.etaS,
     car_position: position,
     car_heading_deg: heading,
     trip_status,
@@ -72,8 +70,7 @@ export const placeholderApi: RideApi = {
         predicted_spot: null, final_spot: null, route_polyline: null, eta_s: 0, rider_message: '', fallbacks_used: [],
       },
       path: [CAR_START],
-      movingSince: null,
-      offsetM: 0,
+      driver: null,
       approachAt: null,
       trip: 'to_pickup',
     })
@@ -120,8 +117,7 @@ export const placeholderApi: RideApi = {
 
   async dispatch(id) {
     const s = get(id)
-    s.movingSince = Date.now()
-    s.offsetM = 0
+    s.driver = new LocalDriver(s.path, PICKUP_SPEED_MPS)
     return delay(snapshot(s), 1500)
   },
 
@@ -131,9 +127,7 @@ export const placeholderApi: RideApi = {
 
   async skipToArrival(id) {
     const s = get(id)
-    const total = pathLengthM(s.path)
-    s.offsetM = Math.max(0, total - APPROACH_M + 1)
-    s.movingSince = Date.now()
+    s.driver?.jumpToRemaining(APPROACH_M - 1)
     return snapshot(s)
   },
 
@@ -146,8 +140,7 @@ export const placeholderApi: RideApi = {
       : [pickup, destination.location]
     s.plan.route_polyline = encode(s.path)
     s.trip = 'to_destination'
-    s.movingSince = Date.now()
-    s.offsetM = 0
+    s.driver = new LocalDriver(s.path, Math.max(TRIP_SPEED_MPS, pathLengthM(s.path) / 12))
     return delay(snapshot(s))
   },
 }
