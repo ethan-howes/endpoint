@@ -146,6 +146,7 @@ def rank_by_exposure(
             walk_polyline=polyline.encode(route_ll, precision=5),
             indoor_m=round(route.indoor_m, 1),
             route_notes=list(route.notes),
+            accessibility=walk_network.to_accessibility(route, frame),
         ))
 
     ranked.sort(key=lambda r: (-r.score, r.wet_m or 0.0, r.spot.walk_distance_m, r.spot.spot_id))

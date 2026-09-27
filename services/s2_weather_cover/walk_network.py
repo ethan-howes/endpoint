@@ -49,6 +49,7 @@ import shapely.ops
 from shapely.geometry import LineString, Point
 from shapely.strtree import STRtree
 
+from shared.models import LatLng, RouteAccessibility
 from shared.config import (
     NO_WALKTHROUGH_BUILDINGS,
     OPEN_SIDED_BUILDINGS,
@@ -160,6 +161,8 @@ class Network:
     #: and vehicle roads (a link across one pays for it).
     barriers: object = None
     roads: object = None
+    #: OSM node id -> "flush" | "lowered" | "raised", for kerb nodes.
+    kerbs: dict[int, str] = field(default_factory=dict)
     _seg_tree: STRtree | None = None
     _tree: STRtree | None = None
     _tree_ids: list[str] = field(default_factory=list)
@@ -396,6 +399,7 @@ def build_network(path_map: PathMap, cover_map: CoverMap | None, shade_map: Shad
         entrances={i for i in path_map.entrances if i in points},
         covers=list(cover_map.covers) if cover_map else [],
         walls=walls, buildings=buildings, segs=segments, barriers=barriers, roads=roads,
+        kerbs=dict(path_map.kerbs),
     )
     if segments:
         net._seg_tree = STRtree([LineString([s.pa, s.pb]) for s in segments])
@@ -626,6 +630,10 @@ class Route:
     #: Names (or None) of the buildings walked through, in order, and their ids.
     through: list[str | None] = field(default_factory=list)
     through_ids: list[str] = field(default_factory=list)
+    #: Step-free kerbs the route passes over, in order, and crossing counts.
+    ramps: list[XY] = field(default_factory=list)
+    unramped_crossings: int = 0
+    raised_crossings: int = 0
 
 
 def _same_segment(net: Network, s: Search, stop_links: list[Link]) -> tuple[float, list[Edge], list[XY]] | None:
@@ -664,6 +672,7 @@ def route_to(net: Network, s: Search, stop_xy: XY) -> Route | None:
     if best is None and direct is None:
         return None
 
+    nodes: list[int] = []
     if direct is not None and (best is None or direct[0] <= best[0]):
         cost, edges, pts = direct
         last_leg = math.hypot(stop_xy[0] - pts[-1][0], stop_xy[1] - pts[-1][1])
@@ -672,7 +681,7 @@ def route_to(net: Network, s: Search, stop_xy: XY) -> Route | None:
         pts = pts + [stop_xy]
     else:
         cost, lk = best
-        edges, nodes, first_via = [], [], None
+        edges, first_via = [], None
         n: int | None = lk.node
         while n is not None and n != RIDER:
             r = s.reach[n]
@@ -690,6 +699,17 @@ def route_to(net: Network, s: Search, stop_xy: XY) -> Route | None:
 
     length = sum(e.length for e in edges)
     dry = min(sum(e.dry for e in edges), length)
+
+    # Out-and-back legs are an artefact of joining the graph at a node past the
+    # stop (or the rider) and walking back along the same line. Nobody walks
+    # like that, and drawing it reads as a broken route. Removing the spike only
+    # shortens the walk along the same corridor, so the wet/dry split scales.
+    raw_len = _polyline_length(pts)
+    pts = _despike(pts)
+    clean_len = _polyline_length(pts)
+    if raw_len > 0 and clean_len < raw_len - 0.01:
+        scale = clean_len / raw_len
+        length, dry = length * scale, min(dry * scale, length * scale)
     indoor = sum(e.length for e in edges if e.flag == "indoor")
     penalty = sum(e.penalty for e in edges)
 
@@ -717,9 +737,64 @@ def route_to(net: Network, s: Search, stop_xy: XY) -> Route | None:
         if extra:
             notes.append(extra)
 
+    ramps = _ramps_on(net, pts)
+    raised = {e.way for e in edges if e.flag == "raised_crossing"}
     return Route(
         points=pts, length=length, wet=length - dry, dry=dry, indoor_m=indoor,
         penalty=penalty, cost=cost, notes=notes, through=through, through_ids=through_ids,
+        ramps=ramps, unramped_crossings=len(unknown), raised_crossings=len(raised),
+    )
+
+
+def _ramps_on(net: Network, pts: list[XY]) -> list[XY]:
+    """Step-free kerbs on the drawn route, in walk order. Measured against the
+    geometry, not the visited nodes: a route that joins a crossing partway along
+    passes over its kerb without ever visiting that node."""
+    ids = [n for n, k in net.kerbs.items() if k in ("flush", "lowered") and n in net.index]
+    if not ids or len(pts) < 2:
+        return []
+    line = LineString(pts)
+    xy = net.xy[[net.index[n] for n in ids]]
+    near = shapely.distance(shapely.points(xy), line) <= 0.5
+    hits = [tuple(p) for p, ok in zip(xy, near) if ok]
+    return sorted(hits, key=lambda p: line.project(Point(p)))
+
+
+def _polyline_length(pts: list[XY]) -> float:
+    return sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:]))
+
+
+def _despike(pts: list[XY], cos_limit: float = -0.95) -> list[XY]:
+    """Drop interior vertices where the path turns straight back on itself
+    (or repeats a point). The first and last points never move."""
+    pts = list(pts)
+    changed = True
+    while changed and len(pts) > 2:
+        changed = False
+        for i in range(1, len(pts) - 1):
+            (ax, ay), (bx, by), (cx, cy) = pts[i - 1], pts[i], pts[i + 1]
+            ux, uy, vx, vy = bx - ax, by - ay, cx - bx, cy - by
+            lu, lv = math.hypot(ux, uy), math.hypot(vx, vy)
+            if lu < 1e-6 or lv < 1e-6 or (ux * vx + uy * vy) / (lu * lv) < cos_limit:
+                del pts[i]
+                changed = True
+                break
+    return pts
+
+
+def to_accessibility(route: Route, frame) -> RouteAccessibility:
+    """The wire model of a route's accessibility (``RankedSpot.accessibility``)."""
+    def ll(xy):
+        lat, lng = frame.to_ll(*xy)
+        return LatLng(lat=round(lat, 6), lng=round(lng, 6))
+
+    return RouteAccessibility(
+        step_free="route includes steps" not in route.notes,
+        curb_ramps=[ll(p) for p in route.ramps],
+        unramped_crossings=route.unramped_crossings,
+        raised_crossings=route.raised_crossings,
+        through_buildings=[n or "a campus building" for n in route.through],
+        notes=list(route.notes),
     )
 
 
@@ -744,4 +819,5 @@ def closed_buildings(net: Network, local: datetime) -> frozenset[str]:
 __all__ = [
     "Building", "Edge", "Link", "Network", "Route", "Search",
     "build_network", "closed_buildings", "dry_geometry", "route_to", "search",
+    "to_accessibility",
 ]

@@ -75,6 +75,8 @@ class Ride:
 
     # --- filled in by /rides/{id}/answer ---
     mobility_needs: bool = False
+    #: "weather" | "accessible": what a rider with mobility needs asked for.
+    priority: str = "weather"
     phase: RidePhase = RidePhase.PREDICTED
     pending_confirmation: bool = False
 

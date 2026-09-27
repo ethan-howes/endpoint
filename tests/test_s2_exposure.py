@@ -299,3 +299,48 @@ class TestWalkRoutes:
         res = await service.walk_routes(WalkRoutesRequest(rider_location=ll(0, 0), spots=self.spots))
         assert res.routes == []
         assert any("no walking network" in f for f in res.fallbacks_used)
+
+
+class TestAccessiblePriority:
+    """``priority=accessible`` ranks by the easiest walk, not by rain cover."""
+
+    @pytest.fixture(autouse=True)
+    def _stubs(self, monkeypatch, campus):
+        path_map, cover_map, shade_map, spots = campus
+        self.spots = spots
+        service.clear_caches()
+
+        async def covers(tile, radius, fallbacks, frame):
+            return cover_map
+
+        async def shade(tile, radius, fallbacks, frame):
+            return shade_map
+
+        async def paths(tile, radius, fallbacks, frame):
+            return path_map
+
+        monkeypatch.setattr(service, "_fetch_covers", covers)
+        monkeypatch.setattr(service, "_fetch_shade", shade)
+        monkeypatch.setattr(service, "_fetch_paths", paths)
+        yield
+        service.clear_caches()
+
+    def _req(self, priority):
+        return RankRequest(
+            rider_location=ll(0, 0), spots=self.spots,
+            pickup_time=datetime(2026, 9, 28, 16, 0, tzinfo=timezone.utc),
+            force_condition=Condition.RAIN, priority=priority,
+        )
+
+    @pytest.mark.anyio
+    async def test_accessible_and_weather_choose_differently(self):
+        """In the campus fixture the covered exit (A) is the dry choice and the
+        nearer open kerb (B) the shorter walk."""
+        weather = await service.rank(self._req("weather"))
+        access = await service.rank(self._req("accessible"))
+        assert weather.ranked[0].spot.spot_id == "A"
+        assert access.ranked[0].spot.spot_id == "B"
+        assert access.mode is Condition.RAIN  # the weather is still reported
+        assert access.ranked[0].accessibility is not None
+        assert access.ranked[0].reason.startswith("Step-free route")
+        assert access.needs_rider_confirmation is False

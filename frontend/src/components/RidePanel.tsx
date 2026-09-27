@@ -161,36 +161,43 @@ function WeatherHint({ ride }: { ride: Ride }) {
   )
 }
 
-/** Sidewalk details for the walk to the pickup (placeholder until an accessibility service exists). */
-function AccessibilityCard({ info }: { info?: AccessibilityInfo }) {
+/** The walk to the car, from S2's accessible routing (OSM steps, kerbs at crossings, doors). */
+function AccessibilityCard({ info, spot }: { info?: AccessibilityInfo; spot: RankedSpot }) {
   if (!info) {
     return (
       <PlaceholderBox source="sidewalk" title="Sidewalk accessibility">
-        <span className="small">Steps, curb ramps, slope and surface along your walk to the car.</span>
+        <span className="small">No walking route for this pickup yet.</span>
       </PlaceholderBox>
     )
   }
   const check = (good: boolean, text: string) => (
     <li className={good ? 'ok' : 'warn'}>{good ? <IconCheck width={16} height={16} /> : <IconAlert width={16} height={16} />}{text}</li>
   )
+  const ramps = info.curb_ramps.length
+  const curb = spot.spot.curb_access
+  const rampM = spot.spot.ramp_distance_m
+  const carDoor =
+    curb === 'flush' ? 'Level curb at the car' :
+    curb === 'lowered' ? (rampM != null && rampM >= 3 ? `Curb ramp ${Math.round(rampM)} m from the car` : 'Curb ramp at the car') :
+    curb === 'raised' ? 'Raised curb at the car' : null
   return (
     <div className="card">
       <div className="card-row">
         <IconAccessible />
         <div className="grow">
           <strong>{info.step_free ? 'Step-free route to your car' : 'This route has steps'}</strong>
-          <span className="muted small">Along the sidewalks to your pickup</span>
+          <span className="muted small">Along the mapped paths to your pickup</span>
         </div>
         <PlaceholderTag source="sidewalk" />
       </div>
       <ul className="checks">
         {check(info.step_free, info.step_free ? 'No stairs or steps' : 'Steps on the route')}
-        <li className="ok"><IconRamp width={16} height={16} />{info.curb_ramps.length} curb ramp{info.curb_ramps.length === 1 ? '' : 's'} on the way</li>
-        {check(info.max_running_slope_pct <= 5, `Slope up to ${info.max_running_slope_pct}%`)}
-        {check(info.max_cross_slope_pct <= 2, `Cross slope up to ${info.max_cross_slope_pct}%`)}
-        {check(info.min_width_m >= 1.5, `${info.surface}, at least ${info.min_width_m} m wide`)}
+        {ramps > 0 && <li className="ok"><IconRamp width={16} height={16} />{ramps} curb ramp{ramps === 1 ? '' : 's'} on the way</li>}
+        {info.raised_crossings > 0 && check(false, `${info.raised_crossings} crossing${info.raised_crossings === 1 ? '' : 's'} with a raised curb`)}
+        {info.unramped_crossings > 0 && <li className="ok"><IconRamp width={16} height={16} />{info.unramped_crossings} crossing{info.unramped_crossings === 1 ? '' : 's'} without a mapped ramp</li>}
+        {carDoor && check(curb !== 'raised', carDoor)}
+        {info.through_buildings.map((b) => <li key={b} className="ok"><IconCheck width={16} height={16} />Through {b} while it’s open</li>)}
       </ul>
-      {info.notes.map((n) => <p key={n} className="muted small note">{n}</p>)}
     </div>
   )
 }
@@ -521,7 +528,7 @@ function Confirm({ ride }: { ride: Ride }) {
       {plan.pickup_mode === 'weather' && <WeatherCard weather={plan.weather} />}
       <SpotCard spot={activeSpot} showConfidence={plan.pickup_mode !== 'standard'} />
       {plan.pickup_mode === 'weather' && <ConditionsCard spot={activeSpot} weather={plan.weather} />}
-      {plan.pickup_mode === 'accessible' && <AccessibilityCard info={activeSpot.accessibility} />}
+      {plan.pickup_mode === 'accessible' && <AccessibilityCard info={activeSpot.accessibility} spot={activeSpot} />}
       {plan.rider_message && <p className="message" aria-live="polite">{plan.rider_message}</p>}
 
       <div className="option">
@@ -557,7 +564,7 @@ function EnRoute({ ride }: { ride: Ride }) {
       {/* S3 Vision results are not shown in the web app yet. */}
       <SpotCard spot={activeSpot} showConfidence={state.pickup_mode !== 'standard'} />
       {state.pickup_mode === 'weather' && <ConditionsCard spot={activeSpot} weather={state.weather} />}
-      {state.pickup_mode === 'accessible' && <AccessibilityCard info={activeSpot.accessibility} />}
+      {state.pickup_mode === 'accessible' && <AccessibilityCard info={activeSpot.accessibility} spot={activeSpot} />}
       <VehicleCard />
       <button className="btn btn--ghost" onClick={ride.reset}>Cancel ride</button>
     </>

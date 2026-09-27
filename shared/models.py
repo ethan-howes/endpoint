@@ -375,6 +375,26 @@ class CoverFeature(BaseModel):
     confidence: Confidence = Confidence.UNVERIFIED
 
 
+class RouteAccessibility(BaseModel):
+    """What the walk to the car is like for someone with a walker or a cane.
+
+    Only what the data supports: steps, the kerbs at crossings, buildings walked
+    through. OSM around FIU carries no slope, cross-slope or footway width, so
+    none is reported rather than invented.
+    """
+
+    step_free: bool = True
+    #: Lowered or flush kerbs the route passes over, in walk order.
+    curb_ramps: list[LatLng] = Field(default_factory=list)
+    #: Crossings where neither end has a mapped kerb (``unknown``), and where an
+    #: end is raised.
+    unramped_crossings: int = 0
+    raised_crossings: int = 0
+    through_buildings: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    source: str = "osm"
+
+
 class RankedSpot(BaseModel):
     spot: Spot
     wait_point: LatLng | None = None
@@ -402,6 +422,7 @@ class RankedSpot(BaseModel):
     #: Plain-language facts about the route: "through Ernest R. Graham Center",
     #: "route includes steps", "2 crossings with no mapped curb ramp".
     route_notes: list[str] = Field(default_factory=list)
+    accessibility: RouteAccessibility | None = None
 
 
 class SunPosition(BaseModel):
@@ -416,6 +437,11 @@ class RankRequest(StrictModel):
     wait_minutes: int = 10
     force_condition: Condition | None = None
     force_time: datetime | None = None
+    #: What the rider asked to prioritise. ``weather`` ranks by rain cover or
+    #: shade (the section 6 behaviour); ``accessible`` ranks by the step-free
+    #: route and the kerb at the car, and reports the weather without letting it
+    #: choose the spot.
+    priority: Literal["weather", "accessible"] = "weather"
 
 
 class WalkRoutesRequest(StrictModel):
@@ -438,6 +464,7 @@ class WalkRoute(BaseModel):
     walk_polyline: str
     indoor_m: float = 0.0
     route_notes: list[str] = Field(default_factory=list)
+    accessibility: RouteAccessibility | None = None
 
 
 class WalkRoutesResponse(BaseModel):

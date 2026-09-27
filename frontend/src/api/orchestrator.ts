@@ -9,14 +9,13 @@
 //  - Rides without mobility needs are confirmed without simulating the car, so the car is driven
 //    here along the orchestrator's route (LocalDriver).
 //  - There's no trip endpoint, so the ride to the destination is routed and driven here.
-//  - pickup_mode, the walking route and sidewalk accessibility are client-side only; the
-//    orchestrator rejects unknown request fields, so they are never sent.
+//  - pickup_mode is sent as `priority` ("accessible" | "weather") when the rider asks for comfort;
+//    the walking route and its accessibility come from S2.
 
 import polyline from '@mapbox/polyline'
 import { distanceAlong, pathFromDistance } from '../lib/geo'
 import { fetchRoute } from '../lib/routing'
 import type { RideApi } from './client'
-import { placeholderAccessibility } from './fixtures'
 import { LocalDriver } from './localDriver'
 import type { AnswerBody, LatLng, PickupMode, RankedSpot, RidePlan, RideRequestResponse, RideState, RideStatus } from './types'
 
@@ -88,6 +87,7 @@ export function orchestratorApi(baseUrl: string): RideApi {
     mobility_needs: b.mobility_needs,
     force_condition: b.mobility_needs ? b.force_condition ?? null : null,
     force_time: b.mobility_needs ? b.force_time ?? null : null,
+    priority: b.pickup_mode === 'accessible' ? 'accessible' : 'weather',
   })
 
   /** Adds the client-only fields: pickup mode, the walking route and (placeholder) sidewalk data. */
@@ -102,7 +102,7 @@ export function orchestratorApi(baseUrl: string): RideApi {
         : (await fetchRoute('foot', rider, active.spot.stop_point))?.path ?? [rider, active.spot.stop_point]
       extra = {
         walk_polyline: encode(path),
-        accessibility: mode === 'accessible' ? placeholderAccessibility(path, true) : undefined,
+        accessibility: mode === 'accessible' ? active.accessibility ?? undefined : undefined,
       }
     }
     const withExtra = (r: RankedSpot | null) => (r && active && r.spot.spot_id === active.spot.spot_id ? { ...r, ...extra } : r)

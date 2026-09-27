@@ -98,7 +98,7 @@ def nearest_spot(spots: list[Spot]) -> Spot | None:
 # --------------------------------------------------------------------------- #
 
 async def fetch_conditions(
-    ride: Ride, spots: list[Spot], pickup_time, force_condition=None, force_time=None
+    ride: Ride, spots: list[Spot], pickup_time, force_condition=None, force_time=None,
 ) -> ConditionsResult | None:
     result = await call_service(
         "S2", "POST", "/conditions/rank",
@@ -109,6 +109,7 @@ async def fetch_conditions(
             wait_minutes=DEFAULT_WAIT_MINUTES,
             force_condition=force_condition,
             force_time=force_time,
+            priority=ride.priority if ride.priority in ("weather", "accessible") else "weather",
         ).model_dump(mode="json"),
         model=ConditionsResult,
     )
@@ -151,9 +152,11 @@ async def plan_ride(
     mobility_needs: bool,
     force_condition=None,
     force_time=None,
+    priority: str = "weather",
 ) -> None:
     """Run the predictive phase and populate ``ride`` in place."""
     ride.mobility_needs = mobility_needs
+    ride.priority = priority
 
     # S1 was kicked off at /rides/request so the rider saw the mobility question
     # without waiting for it. Await that task; if there is none (or it failed),
@@ -287,7 +290,9 @@ async def on_approach(ride: Ride) -> None:
 
     # §3 step 7: the real-time phase is skipped entirely in neutral conditions --
     # there is nothing to protect against, so looking is wasted time and money.
-    if not ride.mobility_needs or neutral:
+    # Likewise for an accessible pickup: the camera looks for cover and shade,
+    # which is not what chose the spot.
+    if not ride.mobility_needs or neutral or ride.priority == "accessible":
         ride.final_spot = predicted
         ride.phase = RidePhase.CONFIRMED
         ride.rider_message = messages.build(ride)

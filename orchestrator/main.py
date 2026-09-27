@@ -26,6 +26,7 @@ import asyncio
 import contextlib
 import logging
 from contextlib import asynccontextmanager
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -75,6 +76,10 @@ class AnswerRequest(StrictModel):
     mobility_needs: bool
     force_condition: Condition | None = None
     force_time: str | None = None
+    #: With ``mobility_needs``, what to prioritise: ``weather`` (cover or shade,
+    #: the section 6 behaviour) or ``accessible`` (the step-free route and the
+    #: kerb at the car). Ignored when ``mobility_needs`` is false.
+    priority: Literal["weather", "accessible"] = "weather"
 
 
 class ConfirmRequest(StrictModel):
@@ -294,6 +299,7 @@ async def rides_answer(ride_id: str, req: AnswerRequest) -> RidePlan:
         mobility_needs=req.mobility_needs,
         force_condition=req.force_condition,
         force_time=force_time,
+        priority=req.priority,
     )
 
     # Only a ride that is still predicted needs a car en route. One that is

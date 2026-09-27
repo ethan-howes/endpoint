@@ -964,3 +964,40 @@ class TestRainWaitWording:
     def test_no_wait_point_does_not_claim_cover(self, client, stub):
         msg = self._msg(client, stub, None, cover=False)
         assert "cover" not in msg.split(".")[0]
+
+
+class TestAccessiblePriority:
+    def test_the_priority_is_forwarded_to_s2(self, client, stub):
+        rid = _request(client)
+        client.post(f"/rides/{rid}/answer", json={"mobility_needs": True, "priority": "accessible"})
+        assert stub.last_body("S2")["priority"] == "accessible"
+
+    def test_it_defaults_to_weather(self, client, stub):
+        rid = _request(client)
+        client.post(f"/rides/{rid}/answer", json={"mobility_needs": True})
+        assert stub.last_body("S2")["priority"] == "weather"
+
+    def test_an_accessible_ride_skips_the_cover_camera(self, client, stub):
+        stub.s3_ok = True
+        rid = _request(client)
+        client.post(f"/rides/{rid}/answer", json={"mobility_needs": True, "priority": "accessible"})
+        client.post(f"/rides/{rid}/skip_to_arrival")
+        assert not stub.called("S3")
+
+    def test_the_message_is_about_the_walk_not_the_cover(self, client, stub):
+        from shared.models import RouteAccessibility
+
+        best = _ranked(stub.spots[1], 0.9, "Step-free route").model_copy(
+            update={"accessibility": RouteAccessibility(step_free=True)})
+        stub.conditions = ConditionsResult(weather=_weather(), mode=Condition.RAIN, ranked=[best])
+        rid = _request(client)
+        msg = client.post(f"/rides/{rid}/answer",
+                          json={"mobility_needs": True, "priority": "accessible"}).json()["rider_message"]
+        assert "step-free route" in msg
+        assert "under cover" not in msg
+        assert "raining at pickup" in msg
+
+    def test_an_unknown_priority_is_rejected(self, client, stub):
+        rid = _request(client)
+        r = client.post(f"/rides/{rid}/answer", json={"mobility_needs": True, "priority": "fastest"})
+        assert r.status_code == 422

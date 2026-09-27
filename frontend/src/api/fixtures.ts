@@ -106,11 +106,10 @@ export function placeholderAccessibility(walk: LatLng[], stepFree: boolean): Acc
   return {
     step_free: stepFree,
     curb_ramps: walk.length > 1 ? [pointAlong(walk, total * 0.55).position, walk[walk.length - 1]] : [],
-    max_running_slope_pct: stepFree ? 3.5 : 6.8,
-    max_cross_slope_pct: stepFree ? 1.5 : 2.6,
-    surface: stepFree ? 'Smooth concrete' : 'Pavers with raised joints',
-    min_width_m: stepFree ? 1.8 : 1.2,
-    notes: stepFree ? ['Avoids the steps at the Graham Center east entrance'] : ['Two steps near the Graham Center east entrance'],
+    unramped_crossings: stepFree ? 0 : 1,
+    raised_crossings: 0,
+    through_buildings: [],
+    notes: [],
     source: 'placeholder',
   }
 }

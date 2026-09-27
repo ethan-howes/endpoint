@@ -281,3 +281,33 @@ class TestCurbAccessRanking:
         far = service._curb_factor(self._ranked("b", 1, CurbAccess.LOWERED, 15.0).spot)
         assert near == pytest.approx(1.0)
         assert far == pytest.approx(1.0 - SETTINGS.curb_lowered_decay)
+
+
+class TestDespike:
+    def test_an_out_and_back_leg_is_removed(self):
+        pts = [at(0, 0), at(10, 0), at(20, 0), at(14, 0), at(14, 5)]
+        out = walk_network._despike(pts)
+        assert out[0] == pts[0] and out[-1] == pts[-1]
+        assert walk_network._polyline_length(out) < walk_network._polyline_length(pts)
+        xs = [p[0] - OX for p in out]
+        assert max(xs) <= 14.01  # never walks past 14 m and back
+
+    def test_a_real_corner_is_kept(self):
+        pts = [at(0, 0), at(10, 0), at(10, 10)]
+        assert walk_network._despike(pts) == pts
+
+
+class TestRouteAccessibility:
+    def test_ramps_and_crossings_are_reported(self):
+        ways = [way(1, [(1, 0, 0), (2, 0, 10), (3, 0, 20)], footway="crossing")]
+        net = build(blocks=[], ways=ways, kerbs={1: "lowered"})
+        r = route(net, start=(0, -1), stop=(0, 22))
+        a = walk_network.to_accessibility(r, FRAME)
+        assert a.step_free is True
+        assert len(a.curb_ramps) == 1
+        assert a.unramped_crossings == 1  # one end mapped, the other not
+
+    def test_steps_make_it_not_step_free(self):
+        ways = [way(1, [(1, 0, 0), (2, 20, 0)], highway="steps")]
+        r = route(build(blocks=[], ways=ways), start=(0, 0), stop=(22, 0))
+        assert walk_network.to_accessibility(r, FRAME).step_free is False

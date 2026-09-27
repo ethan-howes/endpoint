@@ -89,7 +89,12 @@ def build(ride: Ride) -> str:
         return f"Your car will pick you up {_walk(spot)} {_where(spot)}."
 
     # --- the section 7 table ---
-    if condition == Condition.RAIN:
+    if ride.priority == "accessible":
+        a = spot.accessibility
+        how = " on a step-free route" if a is not None and a.step_free else ""
+        weather = {Condition.RAIN: " It's raining at pickup.", Condition.SUN: " It's sunny at pickup."}.get(condition, "")
+        lead = f"Your car will pick you up {_walk(spot)} {_where(spot)}{how}.{weather}"
+    elif condition == Condition.RAIN:
         lead = f"It's raining when your car arrives, {_rain_wait(spot)}"
     elif condition == Condition.SUN:
         where = "in the shade" if spot.cover_feature else _where(spot)

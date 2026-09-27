@@ -419,6 +419,7 @@ def _with_route(r: RankedSpot, route: walk_network.Route | None, frame: LocalFra
         ),
         "indoor_m": round(route.indoor_m, 1),
         "route_notes": list(route.notes),
+        "accessibility": walk_network.to_accessibility(route, frame),
     })
 
 
@@ -439,6 +440,21 @@ def _by_route(
         out.append(_with_route(r, route, frame))
     out.sort(key=lambda r: (-r.score, r.spot.walk_distance_m, r.spot.spot_id))
     return out
+
+
+def _accessible_reason(r: RankedSpot) -> str:
+    """One line on why this is the easiest walk: steps, crossings, the car door."""
+    a = r.accessibility
+    walk = f"{r.spot.walk_distance_m:.0f} m walk"
+    if a is None:
+        return f"Nearest pickup, {walk}"
+    bits = [("Step-free route" if a.step_free else "Route includes steps") + f", {walk}"]
+    if a.unramped_crossings:
+        n = a.unramped_crossings
+        bits.append(f"{n} crossing{'s' if n > 1 else ''} without a mapped ramp")
+    if a.through_buildings:
+        bits.append("through " + " and ".join(a.through_buildings))
+    return "; ".join(bits)
 
 
 def _curb_factor(spot: Spot) -> float:
@@ -618,7 +634,20 @@ async def rank(req: RankRequest) -> ConditionsResult:
             net = None
 
     try:
-        if mode is Condition.RAIN:
+        if req.priority == "accessible":
+            # The rider asked for the easiest walk, not for cover: rank by the
+            # step-free route and (below) the kerb at the car. The weather is
+            # still assessed and reported, it just does not choose the spot.
+            if net is not None:
+                routes = _routes(net, req, frame, closed)
+                ranked = [
+                    r.model_copy(update={"reason": _accessible_reason(r)})
+                    for r in _by_route(req.spots, routes, "", frame)
+                ]
+            else:
+                ranked = _by_walk(req.spots, "Nearest pickup; no walking network to check the route")
+
+        elif mode is Condition.RAIN:
             if net is not None:
                 ranked = rain_exposure.rank_by_exposure(
                     req.spots, req.rider_location, net, frame, closed=closed
@@ -710,7 +739,7 @@ async def rank(req: RankRequest) -> ConditionsResult:
 
     needs_confirm = False
     protected = ranked and (ranked[0].wet_m is not None or ranked[0].cover_feature is not None)
-    if protected and mode is not Condition.NEUTRAL:
+    if protected and mode is not Condition.NEUTRAL and req.priority == "weather":
         if any(r.walk_polyline for r in ranked):
             # Real route lengths: compare the winner with the shortest real walk
             # among the candidates, not with S1's straight-line estimate.
@@ -768,6 +797,7 @@ async def walk_routes(req: WalkRoutesRequest) -> WalkRoutesResponse:
             walk_polyline=polyline.encode([frame.to_ll(x, y) for x, y in r.points], precision=5),
             indoor_m=round(r.indoor_m, 1),
             route_notes=list(r.notes),
+            accessibility=walk_network.to_accessibility(r, frame),
         )
         for sid, r in routes.items() if r is not None
     ]
