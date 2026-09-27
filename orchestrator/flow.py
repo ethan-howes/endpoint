@@ -201,7 +201,9 @@ async def plan_ride(
             ))
     else:
         ride.candidates = [as_ranked(s) for s in spots]
-        best = as_ranked(nearest, "Weather service unavailable; using the nearest spot")
+        # Any S2 failure lands here (timeout, outage, bad response), not only a
+        # weather outage; the specific cause is already in `fallbacks_used`.
+        best = as_ranked(nearest, "Conditions service unavailable; using the nearest spot")
 
     ride.predicted_spot = best
     await _dispatch(ride)
@@ -209,14 +211,26 @@ async def plan_ride(
     ride.rider_message = messages.build(ride)
 
 
-async def _dispatch(ride: Ride) -> None:
-    """Route the car to whichever spot we are currently committed to."""
-    spot = ride.predicted_spot
+async def _dispatch(ride: Ride, target: RankedSpot | None = None) -> None:
+    """Route the car from where it is now to ``target``.
+
+    ``target`` defaults to the spot the ride is committed to (the final spot if
+    there is one, else the prediction). Callers that change the destination pass
+    the new spot explicitly: routing to ``predicted_spot`` unconditionally sent
+    the car to the old spot after a vision switch or a declined detour.
+
+    The new route starts at the car's current position, so progress along it
+    starts at zero. Keeping the old ``car_travelled_m`` measured the new route
+    with the old route's odometer, and the car "arrived" the moment it was
+    rerouted.
+    """
+    spot = target or ride.resolved_spot
     if spot is None:
         return
     route = await routing.route(ride.car_position, spot.spot.stop_point)
     ride.route = route
     ride.eta_s = route.eta_s
+    ride.car_travelled_m = 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -262,9 +276,10 @@ async def on_approach(ride: Ride) -> None:
     decision = choose(predicted, alternatives, assessments)
 
     ride.vision_reason = decision.reason
+    ride.vision_switched = decision.switched
     ride.final_spot = decision.chosen
     if decision.switched:
-        await _dispatch(ride)
+        await _dispatch(ride, decision.chosen)
     ride.phase = RidePhase.CONFIRMED
     ride.rider_message = messages.build(ride)
 
@@ -326,22 +341,41 @@ async def confirm(ride: Ride, accept_detour: bool) -> None:
     The first version of this had it exactly inverted, which produced the worst
     possible combination: a rider who said "yes, I'll walk the extra two minutes
     for the awning" was moved to the uncovered spot beside them.
+
+    Answering is part of the *predictive* phase, not the end of the ride: the
+    car keeps driving and the real-time phase (§3 steps 7-9) still runs on
+    approach. The previous version marked the ride confirmed here, and the route
+    handler stopped the simulator, so the car froze where it was and vision never
+    looked at the spot the rider chose. The simulator is (re)started by the route
+    handler after this returns.
     """
+    ride.pending_confirmation = False
     predicted = ride.predicted_spot
     if predicted is None:
         ride.phase = RidePhase.CONFIRMED
         return
 
-    if accept_detour:
-        ride.final_spot = predicted
-    else:
+    if not accept_detour:
         near = nearest_spot(ride.spots)
-        ride.final_spot = as_ranked(near, "Closest legal spot; you declined the detour") \
-            if near is not None else predicted
+        if near is not None and near.spot_id != predicted.spot.spot_id:
+            # Prefer S2's own ranking of that spot, which carries its real cover
+            # and wait point, over a bare wrapper.
+            target = next(
+                (c for c in ride.candidates if c.spot.spot_id == near.spot_id),
+                None,
+            ) or as_ranked(near, "Closest legal spot; you declined the detour")
+            if ride.approach_done:
+                # The car already reached the approach threshold while the
+                # question was open, so the camera looked at the old spot. The
+                # rider's choice still wins, and its finding no longer applies.
+                ride.final_spot = target
+                ride.vision_reason = ""
+                ride.vision_switched = False
+            else:
+                ride.predicted_spot = target
+            await _dispatch(ride, target)
 
-    ride.pending_confirmation = False
-    await _dispatch(ride)
-    ride.phase = RidePhase.CONFIRMED
+    ride.phase = RidePhase.CONFIRMED if ride.approach_done else RidePhase.PREDICTED
     ride.rider_message = messages.build(ride)
 
 

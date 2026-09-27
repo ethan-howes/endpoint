@@ -71,16 +71,15 @@ def build(ride: Ride) -> str:
         )
 
     # --- the camera moved the car ---
-    if phase == RidePhase.CONFIRMED and ride.final_spot is not None and ride.vision_reason:
-        if "not enough to move" in ride.vision_reason or "farther to walk" in ride.vision_reason:
-            return (
-                f"We checked the nearby spots and kept the closest one, {_walk(spot)}. "
-                f"{ride.vision_reason.capitalize()}."
-            )
+    # Only when fusion actually switched spots. A camera that kept the prediction
+    # adds its finding to the ordinary message below, and a camera that never ran
+    # adds nothing: "we moved your pickup" and "the camera confirmed" are claims
+    # about events, and they must not appear when the events did not happen.
+    if phase == RidePhase.CONFIRMED and ride.final_spot is not None and ride.vision_switched:
         return (
-            f"We moved your pickup to the spot by {spot.spot.street_name or 'the cover'}, "
-            f"{_walk(spot)}. {ride.vision_reason}"
-        )
+            f"We moved your pickup to the spot {_where(spot)}, {_walk(spot)}. "
+            f"{_sentence(ride.vision_reason)}"
+        ).rstrip()
 
     # --- no mobility needs: the product is just a pickup, so say that ---
     if not ride.mobility_needs:
@@ -100,8 +99,19 @@ def build(ride: Ride) -> str:
 
     if phase == RidePhase.PREDICTED:
         lead += f" {_preview(ride)}"
+    elif phase == RidePhase.CONFIRMED and ride.vision_reason:
+        lead += f" {_sentence(ride.vision_reason)}"
 
     return lead + _hedge(spot)
+
+
+def _sentence(text: str) -> str:
+    """``text`` as a sentence: capitalised, with a full stop. Empty stays empty."""
+    text = text.strip()
+    if not text:
+        return ""
+    text = text[0].upper() + text[1:]
+    return text if text.endswith((".", "!", "?")) else text + "."
 
 
 def _preview(ride: Ride) -> str:

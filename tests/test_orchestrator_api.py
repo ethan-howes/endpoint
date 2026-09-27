@@ -89,6 +89,8 @@ class Stub:
         self.s1_ok = True
         self.s2_ok = True
         self.s3_ok = False          # S3 is out of scope in this build
+        #: Raw assessment dicts S3 returns when ``s3_ok`` is set.
+        self.assessments: list[dict] = []
         self.conditions: ConditionsResult | None = None
         self.assessment_delay = 0.0
         self.s1_delay = 0.0
@@ -151,7 +153,7 @@ class Stub:
                 await asyncio.sleep(self.assessment_delay)
             if not self.s3_ok:
                 return ServiceResult(ok=False, reason="S3 unreachable (ConnectError)")
-            resp = {"assessments": []}
+            resp = {"assessments": list(self.assessments)}
         else:
             return ServiceResult(ok=False, reason=f"unexpected service {service}")
 
@@ -552,6 +554,58 @@ class TestSkipToArrival:
         assert a["plan"]["final_spot"]["spot"]["spot_id"] == \
                b["plan"]["final_spot"]["spot"]["spot_id"]
 
+    def test_no_camera_means_no_camera_claim_in_the_message(self, client, stub):
+        """REGRESSION. With S3 down, every rain/sun ride used to end with "We
+        moved your pickup ... camera confirmed the predicted spot": the car had
+        not moved and no camera had looked."""
+        rid = _request(client)
+        client.post(f"/rides/{rid}/answer", json={"mobility_needs": True})
+        msg = client.post(f"/rides/{rid}/skip_to_arrival").json()["plan"]["rider_message"]
+        assert "moved" not in msg.lower()
+        assert "camera" not in msg.lower()
+        assert "raining" in msg.lower()
+
+    def test_a_camera_confirmation_is_reported_as_one(self, client, stub):
+        stub.s3_ok = True
+        stub.assessments = [{
+            "spot_id": "s1_0002", "mode": "rain", "cover_present": True,
+            "vision_score": 0.9, "model_confidence": 0.9, "reason": "awning visible",
+        }]
+        rid = _request(client)
+        client.post(f"/rides/{rid}/answer", json={"mobility_needs": True})
+        status = client.post(f"/rides/{rid}/skip_to_arrival").json()
+        assert status["plan"]["final_spot"]["spot"]["spot_id"] == "s1_0002"
+        msg = status["plan"]["rider_message"]
+        assert "camera confirmed" in msg.lower()
+        assert "moved" not in msg.lower()
+
+    def test_a_vision_switch_routes_the_car_to_the_new_spot(self, client, stub):
+        """REGRESSION. `_dispatch` always routed to `predicted_spot`, so a vision
+        switch changed `final_spot` while the car kept driving to the old spot,
+        and the reroute kept the old route's odometer."""
+        import polyline as _poly
+
+        stub.s3_ok = True
+        stub.assessments = [
+            {"spot_id": "s1_0002", "mode": "rain", "vision_score": 0.05,
+             "model_confidence": 0.9, "reason": "no awning in view"},
+            {"spot_id": "s1_0001", "mode": "rain", "vision_score": 0.95,
+             "model_confidence": 0.9, "reason": "covered entrance beside the kerb"},
+        ]
+        rid = _request(client)
+        client.post(f"/rides/{rid}/answer", json={"mobility_needs": True})
+        status = client.post(f"/rides/{rid}/skip_to_arrival").json()
+
+        assert status["plan"]["final_spot"]["spot"]["spot_id"] == "s1_0001"
+        assert status["plan"]["rider_message"].startswith("We moved your pickup")
+
+        ride = RIDES.get(rid)
+        end_lat, end_lng = _poly.decode(ride.route.polyline)[-1]
+        target = stub.spots[0].stop_point
+        assert abs(end_lat - target.lat) < 1e-4 and abs(end_lng - target.lng) < 1e-4
+        # The new route starts where the car is, so the whole of it is still ahead.
+        assert status["remaining_m"] == pytest.approx(ride.route.distance_m, abs=0.5)
+
     def test_neutral_weather_skips_the_look_entirely(self, client, stub):
         """§3 step 7: there is nothing to protect against, so looking is wasted
         time and image budget."""
@@ -579,20 +633,57 @@ class TestConfirm:
         plan = client.post(f"/rides/{rid}/answer",
                            json={"mobility_needs": True}).json()
         predicted = plan["predicted_spot"]["spot"]["spot_id"]
-        final = client.post(f"/rides/{rid}/confirm",
+        after = client.post(f"/rides/{rid}/confirm",
                             json={"accept_detour": True}).json()
+        # Still the predictive phase: the car is on its way and vision has not
+        # looked yet (§3 steps 7-9 run on approach).
+        assert after["phase"] == "predicted"
+        assert after["predicted_spot"]["spot"]["spot_id"] == predicted
+        final = client.post(f"/rides/{rid}/skip_to_arrival").json()
         assert final["phase"] == "confirmed"
-        assert final["final_spot"]["spot"]["spot_id"] == predicted
+        assert final["plan"]["final_spot"]["spot"]["spot_id"] == predicted
 
     def test_decline_moves_to_the_nearest_legal_spot(self, client, stub):
         """The whole point of the question: a rider who would rather not walk the
         extra distance gets the spot they are already standing next to."""
+        import polyline as _poly
+
         rid = _request(client)
         client.post(f"/rides/{rid}/answer", json={"mobility_needs": True})
-        final = client.post(f"/rides/{rid}/confirm",
+        after = client.post(f"/rides/{rid}/confirm",
                             json={"accept_detour": False}).json()
-        assert final["phase"] == "confirmed"
-        assert final["final_spot"]["spot"]["spot_id"] == "s1_0001"  # nearest
+        assert after["phase"] == "predicted"
+        assert after["predicted_spot"]["spot"]["spot_id"] == "s1_0001"  # nearest
+        # And the car is actually routed there, not to the covered spot.
+        end_lat, end_lng = _poly.decode(RIDES.get(rid).route.polyline)[-1]
+        target = stub.spots[0].stop_point
+        assert abs(end_lat - target.lat) < 1e-4 and abs(end_lng - target.lng) < 1e-4
+        final = client.post(f"/rides/{rid}/skip_to_arrival").json()
+        assert final["plan"]["final_spot"]["spot"]["spot_id"] == "s1_0001"
+
+    def test_answering_keeps_the_car_moving(self, client, stub):
+        """REGRESSION. The route handler cancelled the simulator and never
+        restarted it, so the car froze wherever it was when the rider answered and
+        the real-time phase never ran."""
+        rid = _request(client)
+        client.post(f"/rides/{rid}/answer", json={"mobility_needs": True})
+        client.post(f"/rides/{rid}/confirm", json={"accept_detour": False})
+        ride = RIDES.get(rid)
+        assert ride.sim_task is not None and not ride.sim_task.done()
+        assert ride.approach_done is False
+
+    def test_a_decline_after_arrival_still_moves_the_car(self, client, stub):
+        """The question can still be open when the car reaches the approach
+        threshold. The rider's answer wins, and the car is driven to it."""
+        rid = _request(client)
+        client.post(f"/rides/{rid}/answer", json={"mobility_needs": True})
+        client.post(f"/rides/{rid}/skip_to_arrival")
+        after = client.post(f"/rides/{rid}/confirm",
+                            json={"accept_detour": False}).json()
+        assert after["phase"] == "confirmed"
+        assert after["final_spot"]["spot"]["spot_id"] == "s1_0001"
+        ride = RIDES.get(rid)
+        assert ride.sim_task is not None and not ride.sim_task.done()
 
     def test_the_question_is_offered_only_when_s2_asks_for_it(self, client, stub):
         """§7: the route is "only used when S2 sets needs_rider_confirmation".
@@ -678,3 +769,74 @@ class TestDegradedRidesStayUsable:
                            json={"mobility_needs": False}).json()
         assert plan["phase"] == "confirmed"
         assert plan["predicted_spot"] is not None
+
+
+# --------------------------------------------------------------------------- #
+# simulator
+# --------------------------------------------------------------------------- #
+
+class TestSimulator:
+    """Driven directly with a fast tick, so these take milliseconds."""
+
+    @pytest.fixture(autouse=True)
+    def _fast(self, monkeypatch):
+        import dataclasses
+
+        from orchestrator import simulator
+
+        # ~100 m per 50 ms tick, so a 1.5 km demo route drives in under a second.
+        monkeypatch.setattr(simulator, "SETTINGS", dataclasses.replace(
+            SETTINGS, sim_tick_s=0.05, sim_speedup=400.0,
+            approach_distance_m=0.0, approach_eta_s=0.0,
+        ))
+
+    @staticmethod
+    def _ride():
+        from orchestrator.ride import Ride
+
+        return Ride(ride_id="r_test", rider_location=RIDER,
+                    car_start=LatLng(lat=25.7625, lng=-80.3850),
+                    car_position=LatLng(lat=25.7625, lng=-80.3850))
+
+    def test_follows_a_route_swapped_in_mid_run(self):
+        """REGRESSION. Speed was derived once from the first route, and progress
+        was never reset, so a reroute drove the new route at the old pace from
+        the old odometer reading."""
+        from orchestrator import simulator
+
+        ride = self._ride()
+        near = _spot("s1_0001", 20.0, lat=25.75700, lng=-80.37210)
+        far = LatLng(lat=25.7625, lng=-80.3850)
+
+        async def go():
+            ride.route = await _fake_route(far, near.stop_point)
+            ride.predicted_spot = _ranked(near, 0.9)
+            task = asyncio.create_task(simulator.run(ride, _noop))
+            await asyncio.sleep(0.12)
+            assert ride.car_travelled_m > 0
+            # Reroute the way flow._dispatch does.
+            ride.route = await _fake_route(ride.car_position, near.stop_point)
+            ride.car_travelled_m = 0.0
+            await asyncio.wait_for(task, timeout=5)
+
+        asyncio.run(go())
+        assert ride.car_travelled_m == pytest.approx(ride.route.distance_m)
+        assert ride.car_position == near.stop_point
+
+    def test_an_unusable_route_still_runs_the_approach(self):
+        from orchestrator import simulator
+        from orchestrator.ride import Route
+
+        ride = self._ride()
+        ride.route = Route()  # no route at all
+        calls = []
+
+        async def on_approach():
+            calls.append(1)
+
+        asyncio.run(simulator.run(ride, on_approach))
+        assert calls == [1]
+
+
+async def _noop():
+    return None

@@ -306,13 +306,17 @@ async def rides_answer(ride_id: str, req: AnswerRequest) -> RidePlan:
 
 @app.post("/rides/{ride_id}/confirm", response_model=RidePlan)
 async def rides_confirm(ride_id: str, req: ConfirmRequest) -> RidePlan:
-    """Answer the detour question. Only reached when S2 asked for one."""
+    """Answer the detour question. Only reached when S2 asked for one.
+
+    The simulator is left running: ``flow.confirm`` reroutes in place when the
+    destination changes, and the simulator re-reads the route every tick. It is
+    started here if it has already finished (the car arrived while the question
+    was open), so a declined detour still drives the car to the new spot.
+    """
     ride = _get_ride(ride_id)
-    if ride.sim_task and not ride.sim_task.done():
-        ride.sim_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await ride.sim_task
     await flow.confirm(ride, req.accept_detour)
+    if ride.mobility_needs and ride.predicted_spot is not None:
+        flow.start_simulation(ride)
     return _to_plan(ride)
 
 
