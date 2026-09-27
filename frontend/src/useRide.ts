@@ -5,14 +5,24 @@
 import polyline from '@mapbox/polyline'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api/client'
-import { CAR_START, RIDER_LOCATION } from './api/fixtures'
+import { CAR_START, RIDER_ADDRESS, RIDER_LOCATION } from './api/fixtures'
+import type { Condition, LatLng, PickupMode, Place, RidePlan, RideState, Spot } from './api/types'
+import { reverseGeocode } from './lib/geocode'
 
 const decode = (encoded: string): LatLng[] => polyline.decode(encoded).map(([lat, lng]) => ({ lat, lng }))
-import type { Condition, LatLng, PickupMode, Place, RidePlan, RideState, Spot } from './api/types'
 
 export type Stage =
-  | 'home' | 'search' | 'requesting' | 'comfort' | 'planning' | 'detour' | 'confirm'
+  | 'home' | 'search' | 'pickPin' | 'requesting' | 'comfort' | 'planning' | 'detour' | 'confirm'
   | 'dispatching' | 'enroute' | 'arrived' | 'ontrip' | 'complete'
+
+/** Where the rider wants to be picked up. Sent to the orchestrator as rider_location. */
+export interface Pickup {
+  label: string
+  address: string
+  location: LatLng
+}
+
+export const DEFAULT_PICKUP: Pickup = { label: 'Current location', address: RIDER_ADDRESS, location: RIDER_LOCATION }
 
 export interface DemoSettings {
   forceCondition: Condition | null // sent as force_condition; null = real weather
@@ -61,6 +71,9 @@ export function useRide() {
   const [error, setError] = useState<string | null>(null)
   const [feedback, setFeedback] = useState<'up' | 'down' | null>(null)
   const [updating, setUpdating] = useState(false)
+  const [pickup, setPickup] = useState<Pickup>(DEFAULT_PICKUP)
+  // Map centre while the rider is placing a pin ("Choose on map").
+  const [pinDraft, setPinDraft] = useState<LatLng | null>(null)
 
   // Bumped whenever the flow restarts so late responses from an abandoned ride are ignored.
   const seq = useRef(0)
@@ -99,7 +112,28 @@ export function useRide() {
 
   // ---- flow actions -------------------------------------------------------
 
-  const openSearch = useCallback(() => setStage('search'), [])
+  // Which field the search screen focuses: the destination (default) or the pickup.
+  const [searchFocus, setSearchFocus] = useState<'pickup' | 'destination'>('destination')
+  const openSearch = useCallback((focus: 'pickup' | 'destination' = 'destination') => {
+    setSearchFocus(focus)
+    setStage('search')
+  }, [])
+
+  const startPinPick = useCallback(() => {
+    setPinDraft(pickup.location)
+    setStage('pickPin')
+  }, [pickup.location])
+
+  const confirmPin = useCallback(async () => {
+    const at = pinDraft ?? pickup.location
+    setSearchFocus('destination')
+    setStage('search')
+    const coords = `${at.lat.toFixed(5)}, ${at.lng.toFixed(5)}`
+    setPickup({ label: 'Pin on map', address: coords, location: at })
+    // Fill in a street address when the geocoder answers; the pin is usable either way.
+    const address = await reverseGeocode(at)
+    if (address) setPickup((p) => (p.location === at ? { ...p, address } : p))
+  }, [pinDraft, pickup.location])
 
   const chooseDestination = useCallback((place: Place) => {
     seq.current++
@@ -108,7 +142,7 @@ export function useRide() {
     setSpots([])
     setPlan(null)
     setStage('requesting')
-    guard(api.requestRide(RIDER_LOCATION, CAR_START), (res) => {
+    guard(api.requestRide(pickup.location, CAR_START), (res) => {
       setRideId(res.ride_id)
       setSpots(res.spots ?? [])
       setQuestion(res.question)
@@ -116,7 +150,7 @@ export function useRide() {
       if (settings.alwaysAsk || pref === null) setStage('comfort')
       else runPlan(res.ride_id, pref)
     })
-  }, [guard, runPlan, settings.alwaysAsk])
+  }, [guard, runPlan, settings.alwaysAsk, pickup.location])
 
   const choosePickupMode = useCallback((mode: PickupMode) => {
     if (!rideId) return
@@ -161,6 +195,7 @@ export function useRide() {
 
   const back = useCallback(() => {
     if (stage === 'search') { setStage('home'); return }
+    if (stage === 'pickPin') { setStage('search'); return }
     seq.current++
     setSpots([])
     setPlan(null)
@@ -198,8 +233,8 @@ export function useRide() {
   const weatherCondition: Condition | null = current?.weather?.condition ?? settings.forceCondition
   const route = useMemo<LatLng[]>(() => (current?.route_polyline ? decode(current.route_polyline) : []), [current?.route_polyline])
   const walk = useMemo<LatLng[]>(
-    () => (activeSpot?.walk_polyline ? decode(activeSpot.walk_polyline) : activeSpot ? [RIDER_LOCATION, activeSpot.spot.stop_point] : []),
-    [activeSpot],
+    () => (activeSpot?.walk_polyline ? decode(activeSpot.walk_polyline) : activeSpot ? [pickup.location, activeSpot.spot.stop_point] : []),
+    [activeSpot, pickup.location],
   )
 
   return {
@@ -209,7 +244,8 @@ export function useRide() {
     // The orchestrator returns legal spots with the plan (as candidates), not with the request.
     spots: spots.length ? spots : (current?.candidates ?? []).map((c) => c.spot),
     stage, destination, pickupMode, question, plan: current, ride, activeSpot, route, walk, error, feedback,
-    rider: RIDER_LOCATION,
+    rider: pickup.location,
+    pickup, setPickup, searchFocus, pinDraft, setPinDraft, startPinPick, confirmPin,
     openSearch, chooseDestination, choosePickupMode, answerDetour, confirmPickup, startTrip, skipToArrival,
     reset, back, setPickupMode, setFeedback,
   }

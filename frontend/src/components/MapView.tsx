@@ -1,7 +1,7 @@
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { useEffect, useRef } from 'react'
-import { CircleMarker, GeoJSON, MapContainer, Marker, Polygon, Polyline, TileLayer, Tooltip, useMap } from 'react-leaflet'
+import { CircleMarker, GeoJSON, MapContainer, Marker, Polygon, Polyline, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet'
 import { SHADEMAP_KEY, isPlaceholder } from '../api/dataSources'
 import { DEFAULT_ZOOM, MAP_CENTER } from '../api/fixtures'
 import type { CoverFeature, LatLng } from '../api/types'
@@ -52,7 +52,7 @@ function wktShapes(wkt: string, near: LatLng): Shape[] {
 const COVER_STYLE = { color: '#0a8f7c', fillColor: '#0fb9a0', fillOpacity: 0.4, weight: 1.5 }
 
 /** Fits the map to whatever the current stage is about, leaving room for the demo panel. */
-function Framer({ points, insetRight, follow }: { points: LatLng[]; insetRight: number; follow: boolean }) {
+function Framer({ points, insetRight, follow, stage }: { points: LatLng[]; insetRight: number; follow: boolean; stage: string }) {
   const map = useMap()
   // Rounded (~100 m) so a moving car re-frames the map in steps rather than every poll.
   const key = points.map((p) => `${p.lat.toFixed(3)},${p.lng.toFixed(3)}`).join('|')
@@ -67,7 +67,7 @@ function Framer({ points, insetRight, follow }: { points: LatLng[]; insetRight: 
     }
     if (points.length === 1) map.flyTo(ll(points[0]), DEFAULT_ZOOM, { duration: 0.8 })
     else map.flyToBounds(L.latLngBounds(points.map(ll)), opts)
-  }, [key, insetRight, map, follow])
+  }, [key, insetRight, map, follow, stage])
   return null
 }
 
@@ -158,6 +158,17 @@ function ShadeLayer({ geojson }: { geojson: unknown | null | undefined }) {
   )
 }
 
+/** While placing a pickup pin, reports the map centre (where the fixed pin points) as the map moves. */
+function CenterReporter({ onCenter }: { onCenter: (p: LatLng) => void }) {
+  const map = useMapEvents({
+    move: () => {
+      const c = map.getCenter()
+      onCenter({ lat: c.lat, lng: c.lng })
+    },
+  })
+  return null
+}
+
 export function MapView({ ride, insetRight }: { ride: Ride; insetRight: number }) {
   const { stage, spots, activeSpot, rider, route, walk, destination, plan } = ride
   const accessible = plan?.pickup_mode === 'accessible'
@@ -179,6 +190,7 @@ export function MapView({ ride, insetRight }: { ride: Ride; insetRight: number }
     switch (stage) {
       case 'home':
       case 'search':
+      case 'pickPin':
       case 'requesting':
         return [rider]
       case 'comfort':
@@ -209,7 +221,7 @@ export function MapView({ ride, insetRight }: { ride: Ride; insetRight: number }
           maxZoom={19}
           className="map-tiles"
         />
-        <Framer points={frame} insetRight={insetRight} follow={stage === 'enroute' || stage === 'ontrip'} />
+        <Framer points={frame} insetRight={insetRight} follow={stage === 'enroute' || stage === 'ontrip'} stage={stage} />
 
         {/* Shade from the sun (S2 shade polygons / sun shadow layer). */}
         {condition === 'sun' && <ShadeLayer geojson={shadeGeojson} />}
@@ -259,9 +271,18 @@ export function MapView({ ride, insetRight }: { ride: Ride; insetRight: number }
         {activeSpot && beforePickup && <Marker position={ll(activeSpot.spot.stop_point)} icon={pickupIcon} />}
 
         {destination && (stage === 'ontrip' || stage === 'complete') && <Marker position={ll(destination.location)} icon={destIcon} />}
-        {stage !== 'ontrip' && stage !== 'complete' && <Marker position={ll(rider)} icon={riderIcon} />}
+        {stage === 'pickPin' && <CenterReporter onCenter={ride.setPinDraft} />}
+        {stage !== 'ontrip' && stage !== 'complete' && stage !== 'pickPin' && <Marker position={ll(rider)} icon={riderIcon} />}
         {car && stage !== 'complete' && <CarMarker position={car} path={route} drawRoute={driving} />}
       </MapContainer>
+
+      {stage === 'pickPin' && (
+        <div className="center-pin" aria-hidden>
+          <div className="center-pin-head" />
+          <div className="center-pin-stem" />
+          <div className="center-pin-dot" />
+        </div>
+      )}
 
       <WeatherOverlay condition={condition} />
 

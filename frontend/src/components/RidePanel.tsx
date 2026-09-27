@@ -1,10 +1,11 @@
-import { useEffect, useState, type ReactNode } from 'react'
-import { PLACES, RIDER_ADDRESS } from '../api/fixtures'
-import type { AccessibilityInfo, Confidence, PickupMode, Place, RankedSpot, WeatherReport } from '../api/types'
-import type { Ride } from '../useRide'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { PICKUP_PRESETS, PLACES, inDemoArea } from '../api/fixtures'
+import type { AccessibilityInfo, Confidence, LatLng, PickupMode, Place, RankedSpot, WeatherReport } from '../api/types'
+import { searchAddress, type GeocodeResult } from '../lib/geocode'
+import { DEFAULT_PICKUP, type Ride } from '../useRide'
 import {
   IconAccessible, IconAlert, IconBack, IconBolt, IconCheck, IconClock, IconCloud, IconHome, IconPin, IconRain, IconRamp,
-  IconSearch, IconShield, IconSun, IconThumb, IconUmbrella, IconUnlock, IconWalk, IconWork,
+  IconCampus, IconMapPin, IconSearch, IconShield, IconSun, IconThumb, IconUmbrella, IconUnlock, IconWalk, IconWork,
 } from './Icons'
 import { isPlaceholder } from '../api/dataSources'
 import { PlaceholderBox, PlaceholderTag } from './Placeholder'
@@ -81,6 +82,19 @@ function WeatherCard({ weather }: { weather: WeatherReport | null }) {
 function ConditionsCard({ spot, weather }: { spot: RankedSpot; weather: WeatherReport | null }) {
   const condition = weather?.condition
   if (condition === 'rain') {
+    if (!spot.cover_feature && !isPlaceholder('rain_cover')) {
+      return (
+        <div className="card">
+          <div className="card-row">
+            <IconUmbrella />
+            <div className="grow">
+              <strong>No mapped cover near this spot</strong>
+              <span className="muted small">None of the nearby legal spots has cover within a few steps, so this is the closest.</span>
+            </div>
+          </div>
+        </div>
+      )
+    }
     if (!spot.cover_feature) {
       return (
         <PlaceholderBox source="rain_cover" title="Rain cover at your spot">
@@ -268,7 +282,15 @@ function Home({ ride }: { ride: Ride }) {
     <>
       <div className="brand"><span className="brand-mark" aria-hidden /><span>endpoint</span></div>
       <h1 className="hello">Where to?</h1>
-      <button className="search" onClick={ride.openSearch}>
+      <button className="pickup-chip" onClick={() => ride.openSearch('pickup')}>
+        <span className="pickup-dot" aria-hidden />
+        <span className="grow">
+          <span className="small muted">Pickup</span>
+          <strong>{ride.pickup.label}</strong>
+        </span>
+        <span className="link-btn">Change</span>
+      </button>
+      <button className="search" onClick={() => ride.openSearch('destination')}>
         <IconSearch />
         <span>Search destination</span>
         <span className="chip"><IconClock width={14} height={14} /> Now</span>
@@ -297,24 +319,127 @@ function Home({ ride }: { ride: Ride }) {
   )
 }
 
+/** Debounced address search (Nominatim), for both the pickup and the destination field. */
+function useAddressSearch(query: string): GeocodeResult[] {
+  const [results, setResults] = useState<GeocodeResult[]>([])
+  useEffect(() => {
+    if (query.trim().length < 3) { setResults([]); return }
+    const ctrl = new AbortController()
+    const t = setTimeout(() => { searchAddress(query, ctrl.signal).then((r) => { if (!ctrl.signal.aborted) setResults(r) }) }, 450)
+    return () => { clearTimeout(t); ctrl.abort() }
+  }, [query])
+  return results
+}
+
+const matchesQuery = (p: Place, q: string) => `${p.name} ${p.address}`.toLowerCase().includes(q.trim().toLowerCase())
+const asPlace = (r: GeocodeResult): Place => ({
+  id: `addr_${r.location.lat.toFixed(5)}_${r.location.lng.toFixed(5)}`,
+  name: r.name,
+  address: r.address,
+  kind: 'address',
+  location: r.location,
+})
+
+function OutsideDemoArea() {
+  return (
+    <div className="hint hint--warn" role="status">
+      This pickup is outside the FIU demo area. The backend only has cached street data for campus, so legal pickup spots may be missing.
+    </div>
+  )
+}
+
 function Search({ ride }: { ride: Ride }) {
-  const [q, setQ] = useState('')
-  // Placeholder: a geocoding / places search would replace this local filter.
-  const matches = PLACES.filter((p) => `${p.name} ${p.address}`.toLowerCase().includes(q.toLowerCase()))
+  const [field, setField] = useState<'pickup' | 'destination'>(ride.searchFocus)
+  const [pq, setPq] = useState('')
+  const [dq, setDq] = useState('')
+  const destRef = useRef<HTMLInputElement>(null)
+  const pickupRef = useRef<HTMLInputElement>(null)
+  const pickupResults = useAddressSearch(field === 'pickup' ? pq : '')
+  const destResults = useAddressSearch(field === 'destination' ? dq : '')
+
+  useEffect(() => {
+    ;(ride.searchFocus === 'pickup' ? pickupRef : destRef).current?.focus()
+  }, [ride.searchFocus])
+
+  const choosePickup = (label: string, address: string, location: LatLng) => {
+    ride.setPickup({ label, address, location })
+    setPq('')
+    setField('destination')
+    destRef.current?.focus()
+  }
+
+  const presets = PICKUP_PRESETS.filter((p) => matchesQuery(p, pq))
+  const places = PLACES.filter((p) => matchesQuery(p, dq))
+  const pickupText = `${ride.pickup.label} · ${ride.pickup.address}`
+
   return (
     <>
       <Header title="Plan your ride" onBack={ride.back} />
       <div className="route-inputs">
         <div className="route-dots" aria-hidden><i /><b /><i className="sq" /></div>
         <div className="grow">
-          <div className="input input--static">Current location · {RIDER_ADDRESS}</div>
-          <input className="input" autoFocus placeholder="Where to?" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Destination" />
+          <input
+            ref={pickupRef}
+            className={`input ${field === 'pickup' ? 'input--active' : ''}`}
+            placeholder="Pickup location"
+            value={field === 'pickup' ? pq : pickupText}
+            onFocus={() => { setField('pickup'); setPq('') }}
+            onChange={(e) => setPq(e.target.value)}
+            aria-label="Pickup location"
+          />
+          <input
+            ref={destRef}
+            className={`input ${field === 'destination' ? 'input--active' : ''}`}
+            placeholder="Where to?"
+            value={dq}
+            onFocus={() => setField('destination')}
+            onChange={(e) => setDq(e.target.value)}
+            aria-label="Destination"
+          />
         </div>
       </div>
-      <div className="list">
-        {matches.map((p) => <Row key={p.id} icon={<PlaceIcon place={p} />} title={p.name} sub={p.address} onClick={() => ride.chooseDestination(p)} />)}
-        {!matches.length && <p className="muted small pad">No places match “{q}”.</p>}
+      {!inDemoArea(ride.pickup.location) && <OutsideDemoArea />}
+
+      {field === 'pickup' ? (
+        <div className="list">
+          <Row icon={<IconPin />} title="Current location" sub={DEFAULT_PICKUP.address} onClick={() => choosePickup(DEFAULT_PICKUP.label, DEFAULT_PICKUP.address, DEFAULT_PICKUP.location)} />
+          <Row icon={<IconMapPin />} title="Choose on map" sub="Move the map to place your pickup pin" onClick={ride.startPinPick} />
+          {presets.map((p) => <Row key={p.id} icon={<IconCampus />} title={p.name} sub={p.address} onClick={() => choosePickup(p.name, p.address, p.location)} />)}
+          {pickupResults.map((r) => (
+            <Row key={`${r.location.lat},${r.location.lng}`} icon={<IconSearch />} title={r.name} sub={r.address} onClick={() => choosePickup(r.name, r.address, r.location)} />
+          ))}
+          {pq.trim().length >= 3 && !presets.length && !pickupResults.length && <p className="muted small pad">Searching for “{pq}”…</p>}
+        </div>
+      ) : (
+        <div className="list">
+          {places.map((p) => <Row key={p.id} icon={<PlaceIcon place={p} />} title={p.name} sub={p.address} onClick={() => ride.chooseDestination(p)} />)}
+          {destResults.map((r) => (
+            <Row key={`${r.location.lat},${r.location.lng}`} icon={<IconSearch />} title={r.name} sub={r.address} onClick={() => ride.chooseDestination(asPlace(r))} />
+          ))}
+          {dq.trim().length >= 3 && !places.length && !destResults.length && <p className="muted small pad">Searching for “{dq}”…</p>}
+        </div>
+      )}
+    </>
+  )
+}
+
+function PickPin({ ride }: { ride: Ride }) {
+  const at = ride.pinDraft ?? ride.pickup.location
+  return (
+    <>
+      <Header title="Set your pickup" onBack={ride.back} />
+      <p className="lead">Move the map so the pin sits where you'd like to be picked up.</p>
+      <div className="card card--soft">
+        <div className="card-row">
+          <IconMapPin />
+          <div className="grow">
+            <strong>Pin location</strong>
+            <span className="muted small">{at.lat.toFixed(5)}, {at.lng.toFixed(5)}</span>
+          </div>
+        </div>
       </div>
+      {!inDemoArea(at) && <OutsideDemoArea />}
+      <button className="btn btn--primary" onClick={ride.confirmPin}>Confirm pickup location</button>
     </>
   )
 }
@@ -377,7 +502,7 @@ function Confirm({ ride }: { ride: Ride }) {
         <div className="option-car" aria-hidden />
         <div className="grow">
           <strong>Endpoint</strong>
-          <span className="muted small">To {destination.name} · car {minutes(plan.eta_s)} min away</span>
+          <span className="muted small">{ride.pickup.label} → {destination.name} · car {minutes(plan.eta_s)} min away</span>
         </div>
         <strong>{PLACEHOLDER.fare}</strong>
       </div>
@@ -495,6 +620,7 @@ export function RidePanel({ ride }: { ride: Ride }) {
   switch (ride.stage) {
     case 'home': body = <Home ride={ride} />; break
     case 'search': body = <Search ride={ride} />; break
+    case 'pickPin': body = <PickPin ride={ride} />; break
     case 'requesting': body = <Loading title="Finding your pickup" sub="Looking for places your car can legally stop near you." onBack={ride.back} />; break
     case 'comfort': body = <PickupOptions ride={ride} />; break
     case 'planning': body = <Loading title="Choosing the best spot" sub="Checking sidewalks, weather and cover near you." onBack={ride.back} />; break

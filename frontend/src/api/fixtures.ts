@@ -20,6 +20,29 @@ export const DEFAULT_ZOOM = 17
 export const RIDER_LOCATION: LatLng = { lat: 25.7584, lng: -80.3725 }
 export const RIDER_ADDRESS = 'Near Green Library, FIU'
 
+/**
+ * Campus pickup presets (coordinates from OpenStreetMap). All sit inside the area the backend has
+ * cached OSM data for, so S1 can find legal spots around them even in MOCK mode.
+ */
+export const PICKUP_PRESETS: Place[] = [
+  { id: 'gc', name: 'Graham Center (GC)', address: 'SW 14th St, FIU', kind: 'campus', location: { lat: 25.75622, lng: -80.3727 } },
+  { id: 'gl', name: 'Green Library', address: 'SW 8th St, FIU', kind: 'campus', location: { lat: 25.7571, lng: -80.37375 } },
+  { id: 'cp', name: 'Chemistry & Physics', address: 'University Dr, FIU', kind: 'campus', location: { lat: 25.75853, lng: -80.37202 } },
+  { id: 'ahc5', name: 'Academic Health Center 5', address: 'East Campus Circle, FIU', kind: 'campus', location: { lat: 25.75915, lng: -80.37132 } },
+  { id: 'pg5', name: 'PG5 Market Station', address: 'University Dr, FIU', kind: 'campus', location: { lat: 25.75986, lng: -80.37124 } },
+  { id: 'rb', name: 'Ryder Business Building', address: 'SW 112th Ave, FIU', kind: 'campus', location: { lat: 25.75747, lng: -80.37612 } },
+  { id: 'pc', name: 'Charles E. Perry Building (PC)', address: 'SW 14th St, FIU', kind: 'campus', location: { lat: 25.75552, lng: -80.37379 } },
+  { id: 'wrc', name: 'Wellness & Recreation Center', address: 'East Campus Circle, FIU', kind: 'campus', location: { lat: 25.75576, lng: -80.37804 } },
+  { id: 'arch', name: 'School of Architecture', address: 'University Dr, FIU', kind: 'campus', location: { lat: 25.75891, lng: -80.37565 } },
+  { id: 'frost', name: 'Frost Art Museum', address: 'SW 17th St, FIU', kind: 'campus', location: { lat: 25.75383, lng: -80.37304 } },
+  { id: 'wpac', name: 'Wertheim Performing Arts Center', address: 'FIU', kind: 'campus', location: { lat: 25.75249, lng: -80.37262 } },
+]
+
+/** Where the backend has cached OSM data (S1/S2 fixtures): south, west, north, east. */
+export const DEMO_AREA = { south: 25.752, west: -80.38, north: 25.764, east: -80.368 }
+export const inDemoArea = (p: LatLng) =>
+  p.lat >= DEMO_AREA.south && p.lat <= DEMO_AREA.north && p.lng >= DEMO_AREA.west && p.lng <= DEMO_AREA.east
+
 /** The backend's demo_car_start (shared/config.py); used by placeholder mode. */
 export const CAR_START: LatLng = { lat: 25.7625, lng: -80.385 }
 

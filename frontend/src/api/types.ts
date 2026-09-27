@@ -157,6 +157,6 @@ export interface Place {
   id: string
   name: string
   address: string
-  kind: 'home' | 'work' | 'campus' | 'shopping' | 'hospital' | 'park' | 'airport'
+  kind: 'home' | 'work' | 'campus' | 'shopping' | 'hospital' | 'park' | 'airport' | 'address'
   location: LatLng
 }

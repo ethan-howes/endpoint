@@ -53,7 +53,14 @@ Things that need internet:
 5. **Car on the way.** The app polls `GET /rides/{id}` every second, and the car glides along the real route between polls.
 6. **Your car is here → Unlock → On trip → Arrived**, then a feedback prompt.
 
-The rider stands at the backend's `DEMO_RIDER` (25.7584, -80.3725, near Green Library). Its curbs are about 6 m from cover, so rain mode has real cover to rank.
+### Pickup location
+
+The pickup defaults to the backend's `DEMO_RIDER` (25.7584, -80.3725, near Green Library). Its curbs are about 6 m from cover, so rain mode has real cover to rank. The rider can change it from the **Pickup** chip on the home screen or the pickup field on the search screen:
+- **Campus presets:** Graham Center, Green Library, PG5 and others (`PICKUP_PRESETS` in `src/api/fixtures.ts`, coordinates from OpenStreetMap).
+- **Address search:** OpenStreetMap Nominatim, debounced and biased to the FIU area (`src/lib/geocode.ts`). The same search also works for destinations.
+- **Choose on map:** the map moves under a fixed pin, Uber-style. The address is filled in by reverse geocoding.
+
+The pickup is sent as `rider_location` on `POST /rides/request`. The backend only has cached street data for campus (`DEMO_AREA`), so pickups outside it show a warning: in `MOCK=1`, S1 may find no legal spots there. Placeholder mode moves the rider marker but keeps its fixed campus spots.
 
 ## How the app maps onto the orchestrator
 

@@ -23,4 +23,6 @@ export const IconBolt = (p: P) => <svg {...base} {...p}><path d="M13 3 5 14h6l-1
 export const IconRamp = (p: P) => <svg {...base} {...p}><path d="M3 19h18L3 11Z" /></svg>
 export const IconCheck = (p: P) => <svg {...base} {...p}><path d="m5 12 4 4 10-10" /></svg>
 export const IconAlert = (p: P) => <svg {...base} {...p}><path d="M12 3 2 20h20Z" /><path d="M12 10v4M12 17h0" /></svg>
-export const IconSliders =(p: P) => <svg {...base} {...p}><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0" /><circle cx="16" cy="6" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="18" cy="18" r="2" /></svg>
+export const IconMapPin = (p: P) => <svg {...base} {...p}><circle cx="12" cy="8" r="4" /><path d="M12 12v9" /><path d="M8 21h8" /></svg>
+export const IconCampus = (p: P) => <svg {...base} {...p}><path d="M3 9l9-5 9 5-9 5Z" /><path d="M7 11.5V16c0 1.5 2.2 3 5 3s5-1.5 5-3v-4.5" /></svg>
+export const IconSliders = (p: P) => <svg {...base} {...p}><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0" /><circle cx="16" cy="6" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="18" cy="18" r="2" /></svg>
